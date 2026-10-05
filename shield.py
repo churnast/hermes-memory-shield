@@ -64,8 +64,16 @@ OUTCOME = {"block": "blocked", "approve": "sent for approval", "observe": "obser
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 # A "replace" whose new text is one of these, or has fewer than three letters or digits, wipes the
 # entry just like "remove" does, so it is judged as a removal.
-STUB_WORDS = frozenset({"none", "null", "nil", "empty", "blank", "deleted", "removed", "redacted",
-                        "forgotten", "cleared", "tbd", "todo", "void"})
+STUB_WORDS = frozenset({
+    # English
+    "none", "null", "nil", "empty", "blank", "deleted", "removed", "redacted", "forgotten", "cleared", "tbd",
+    "todo", "void", "n a", "not relevant", "no longer relevant", "obsolete", "outdated",
+    # Russian
+    "нет", "пусто", "пустая запись", "удалено", "удалена", "удалён", "удален", "стёрто", "стерто", "убрано",
+    "очищено", "забыто", "неактуально", "не актуально", "устарело", "запись удалена",
+    # Spanish, Portuguese, German, French
+    "borrado", "eliminado", "apagado", "gelöscht", "entfernt", "supprimé", "vide",
+})
 _SHELL_WRITE = re.compile(
     r">|\b(?:rm|mv|cp|tee|truncate|dd|unlink|shred|install|ln|rsync)\b|\bsed\s+-[a-zA-Z]*i|\bperl\s+-[a-zA-Z]*i"
     r"|-delete\b|write_text|write_bytes|\.write\(|open\([^)]*['\"][wax+]"

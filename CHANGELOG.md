@@ -6,6 +6,13 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [0.1.2] (2026-10-05)
+
+### Fixed
+
+- Placeholder words in Russian and a few other languages ("удалено", "нет", "неактуально", "gelöscht") now count
+  as deleting an entry, like "deleted" and "n/a" already did. Found while testing with a Russian-speaking agent.
+
 ## [0.1.1] (2026-10-05)
 
 ### Fixed
@@ -27,6 +34,7 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/churnast/hermes-memory-shield/releases/tag/v0.1.0

@@ -119,7 +119,8 @@ def test_approval_is_asked_only_in_direct_chats():
     assert shield.decide("memory", replace_user, approve, chat_type="dm", cron="")["action"] == "approve"
 
 
-@pytest.mark.parametrize("content", ["", "  ", "-", "x", "n/a", "[deleted]", "Removed", "none."])
+@pytest.mark.parametrize("content", ["", "  ", "-", "x", "n/a", "[deleted]", "Removed", "none.",
+                                     "удалено", "Нет", "(неактуально)", "запись удалена", "gelöscht"])
 def test_replacing_with_a_placeholder_counts_as_removing(content):
     args = {"action": "replace", "target": "memory", "old_text": "old note", "content": content}
     out = shield.decide("memory", args, DEFAULT, chat_type="dm")

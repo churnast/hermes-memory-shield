@@ -1,5 +1,5 @@
 name: memory-shield
-version: 0.1.1
+version: 0.1.2
 manifest_version: 2
 description: "Guard rails for the built-in memory tool: the owner's profile is append-only, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
 author: "churnast"
