@@ -1,0 +1,52 @@
+name: memory-shield
+version: 0.1.0
+manifest_version: 2
+description: "Guard rails for the built-in memory tool: the owner's profile is append-only, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
+author: "churnast"
+license: MIT
+homepage: "https://github.com/churnast/hermes-memory-shield"
+tags: [memory, safety, prompt-injection, guardrails]
+requires_hermes: ">=0.21.5"
+provides_tools: []
+provides_hooks:
+  - pre_tool_call
+config_schema:
+  user_profile:
+    type: str
+    choices: [append_only, read_only, no_delete, "off"]
+    default: append_only
+    label: "Owner profile (memory target 'user')"
+    description: "append_only: the agent may add facts but not rewrite or delete them."
+  agent_notes:
+    type: str
+    choices: [no_delete, append_only, read_only, "off"]
+    default: no_delete
+    label: "Agent notes (memory target 'memory')"
+    description: "no_delete: the agent may add and update its notes but not delete them."
+  group_chats:
+    type: str
+    choices: [read_only, append_only, no_delete, "off"]
+    default: read_only
+    label: "Shared chats"
+    description: "Applied on top of the levels above in groups, channels, forum topics, guild threads and webhook runs."
+  mode:
+    type: str
+    choices: [block, approve, observe]
+    default: block
+    label: "On a violation"
+    description: "block: refuse with an explanation. approve: ask the owner through Hermes' approval gate (no effect when approvals are off). observe: allow, but log it, to try the policy first."
+  trusted_users:
+    type: list
+    default: []
+    label: "Trusted people in shared chats"
+    description: "Numeric user ids (see /memory-shield whoami). Their own messages in groups may write memory within the levels above."
+  audit_log:
+    type: bool
+    default: true
+    label: "Log refused and flagged writes"
+    description: "Keeps the last 500 events in plugin-data/memory-shield/audit.jsonl; /memory-shield log shows them."
+  snapshots:
+    type: int
+    default: 20
+    label: "Snapshots per memory file"
+    description: "Copies of MEMORY.md / USER.md taken right before the agent edits or deletes entries; /memory-shield restore brings one back. 0 turns them off."
