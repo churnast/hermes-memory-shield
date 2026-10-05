@@ -67,9 +67,12 @@ TIME_FORMAT = "%Y-%m-%d %H:%M"
 STUB_WORDS = frozenset({"none", "null", "nil", "empty", "blank", "deleted", "removed", "redacted",
                         "forgotten", "cleared", "tbd", "todo", "void"})
 _SHELL_WRITE = re.compile(
-    r">|\b(?:rm|mv|cp|tee|truncate|dd|unlink|shred|install|ln)\b|\bsed\s+-[a-zA-Z]*i|\bperl\s+-[a-zA-Z]*i"
-    r"|write_text|write_bytes|\.write\(|open\([^)]*['\"][wax+]|os\.(?:remove|replace|rename|unlink)|shutil\.")
+    r">|\b(?:rm|mv|cp|tee|truncate|dd|unlink|shred|install|ln|rsync)\b|\bsed\s+-[a-zA-Z]*i|\bperl\s+-[a-zA-Z]*i"
+    r"|-delete\b|write_text|write_bytes|\.write\(|open\([^)]*['\"][wax+]"
+    r"|os\.(?:remove|replace|rename|unlink|rmdir)|shutil\.|rmtree|\.unlink\(")
 _SHELL_MEMORY_DIR = re.compile(r"memories|\.hermes|HERMES_HOME")
+# The memory folder itself, for commands that wipe or move it without naming a file.
+_SHELL_MEMORY_FOLDER = re.compile(r"(?:\.hermes|HERMES_HOME|hermes_home\(\))[^\s'\"]*/memories\b|memories/\*")
 
 
 class ShieldError(Exception):
@@ -172,9 +175,13 @@ def memory_file_target(tool_name: str, args: dict[str, Any],
         return None
     if tool_name in SHELL_TOOLS:
         code = str(args.get(SHELL_TOOLS[tool_name]) or "")
+        if not _SHELL_WRITE.search(code):
+            return None
         hits = [target for target, name in MEMORY_FILES.items() if name in code]
-        if hits and _SHELL_MEMORY_DIR.search(code) and _SHELL_WRITE.search(code):
+        if hits and _SHELL_MEMORY_DIR.search(code):
             return hits[0]  # "user" first: the stricter store when both are named
+        if _SHELL_MEMORY_FOLDER.search(code):
+            return "user"  # the whole folder: judged by the stricter store
     return None
 
 

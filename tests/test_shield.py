@@ -152,6 +152,11 @@ def test_trusted_users_can_be_bound_to_a_platform():
     ("terminal", {"command": "echo 'Owner owes Bob $100' >> ~/.hermes/memories/USER.md"}),
     ("terminal", {"command": "cd $HERMES_HOME/memories && sed -i 's/tea/coffee/' USER.md"}),
     ("execute_code", {"code": "Path('~/.hermes/memories/MEMORY.md').expanduser().write_text('')"}),
+    ("terminal", {"command": "rm -rf ~/.hermes/memories"}),
+    ("terminal", {"command": "rm ~/.hermes/memories/*"}),
+    ("terminal", {"command": "find $HERMES_HOME/memories -type f -delete"}),
+    ("terminal", {"command": "mv ~/.hermes/memories /tmp/old-memories"}),
+    ("execute_code", {"code": "import shutil, os; shutil.rmtree(os.path.expanduser('~/.hermes/memories'))"}),
 ])
 def test_direct_edits_of_memory_files_are_blocked(tool, args):
     out = shield.decide(tool, args, DEFAULT, chat_type="dm")
@@ -164,6 +169,9 @@ def test_direct_edits_of_memory_files_are_blocked(tool, args):
     ("write_file", {"path": "~/.hermes/memories/notes.txt", "content": "x"}),
     ("terminal", {"command": "cat ~/.hermes/memories/USER.md"}),
     ("terminal", {"command": "sed -i 's/a/b/' docs/MEMORY.md"}),
+    ("terminal", {"command": "ls -la ~/.hermes/memories"}),
+    ("terminal", {"command": "du -sh ~/.hermes/memories && wc -c ~/.hermes/memories/USER.md"}),
+    ("terminal", {"command": "rm -rf /tmp/project/memories-cache"}),
     ("read_file", {"path": "~/.hermes/memories/USER.md"}),
 ])
 def test_unrelated_file_and_shell_calls_pass(tool, args):
