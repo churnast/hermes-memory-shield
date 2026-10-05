@@ -10,5 +10,6 @@ plugins:
         scheduled_jobs: "off"       # extra limit in cron runs; "off" adds nothing
         mode: block                 # block | approve | observe
         trusted_users: []           # e.g. ["telegram:123456789"]; /memory-shield whoami shows yours
+        trusted_chats: []           # chats with only you and the agent, e.g. ["telegram:-1001234567890"]
         audit_log: true             # keep the last 500 refused or flagged writes
         snapshots: 20               # copies per memory file; 0 turns them off

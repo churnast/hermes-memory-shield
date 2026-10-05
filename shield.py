@@ -109,27 +109,45 @@ def mode(get_config: Callable[[str, Any], Any]) -> str:
     return value if value in MODES else DEFAULTS["mode"]
 
 
-def trusted_users(get_config: Callable[[str, Any], Any]) -> list[str]:
-    """Platform user ids, as 'telegram:12345' or a bare '12345' (any platform). Display names are
-    never trusted: anyone can copy one."""
-    raw = get_config("trusted_users", []) or []
+def _id_list(get_config: Callable[[str, Any], Any], key: str) -> list[str]:
+    raw = get_config(key, []) or []
     if isinstance(raw, (str, int)):
         raw = str(raw).replace(",", " ").split()
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
-def is_trusted(get_config: Callable[[str, Any], Any], user_id: str | None, platform: str | None = "") -> bool:
-    uid = str(user_id or "").strip()
-    if not uid:
+def trusted_users(get_config: Callable[[str, Any], Any]) -> list[str]:
+    """Platform user ids, as 'telegram:12345' or a bare '12345' (any platform). Display names are
+    never trusted: anyone can copy one."""
+    return _id_list(get_config, "trusted_users")
+
+
+def trusted_chats(get_config: Callable[[str, Any], Any]) -> list[str]:
+    """Chats that only the owner and the agent are in, as 'telegram:-100123' or a bare '-100123' (any
+    platform). They are judged like a direct chat."""
+    return _id_list(get_config, "trusted_chats")
+
+
+def _listed(entries: Iterable[str], value: str | None, platform: str | None) -> bool:
+    """'platform:id' matches on that platform only (the id itself may contain colons, as on Matrix);
+    an entry without a colon matches that id on any platform."""
+    wanted = str(value or "").strip()
+    if not wanted:
         return False
     current = str(platform or "").strip().lower()
-    for item in trusted_users(get_config):
-        wanted_platform, sep, wanted_id = item.rpartition(":")
-        if sep and wanted_id == uid and wanted_platform.lower() == current:
-            return True
-        if not sep and item == uid:
+    for item in entries:
+        prefix, sep, rest = item.partition(":")
+        if (sep and prefix.lower() == current and rest == wanted) or (not sep and item == wanted):
             return True
     return False
+
+
+def is_trusted(get_config: Callable[[str, Any], Any], user_id: str | None, platform: str | None = "") -> bool:
+    return _listed(trusted_users(get_config), user_id, platform)
+
+
+def is_trusted_chat(get_config: Callable[[str, Any], Any], chat_id: str | None, platform: str | None = "") -> bool:
+    return _listed(trusted_chats(get_config), chat_id, platform)
 
 
 def is_stub(text: Any) -> bool:
@@ -237,9 +255,10 @@ def _fingerprint(tool_name: str, args: dict[str, Any]) -> str:
 
 def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[str, Any], Any],
              chat_type: str | None = None, user_id: str | None = None, platform: str | None = None,
-             cron: str | None = None, memory_dir: Callable[[], Path] | None = None) -> Verdict | None:
+             cron: str | None = None, memory_dir: Callable[[], Path] | None = None,
+             chat_id: str | None = None) -> Verdict | None:
     """What a call asks to change in memory and which of it the policy denies; None when the call
-    does not touch memory."""
+    does not touch memory. A chat listed in trusted_chats is judged like a direct chat."""
     if tool_name not in WATCHED_TOOLS or not isinstance(args, dict):
         return None
     direct_edit = tool_name != TOOL
@@ -263,8 +282,10 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
         platform = session_value("HERMES_SESSION_PLATFORM")
     if cron is None:
         cron = session_value("HERMES_CRON_SESSION")
+    if chat_id is None:
+        chat_id = session_value("HERMES_SESSION_CHAT_ID")
     context = "direct"
-    if is_shared_chat(chat_type):
+    if is_shared_chat(chat_type) and not is_trusted_chat(get_config, chat_id, platform):
         context = "shared"
         if user_id is None:
             user_id = session_value("HERMES_SESSION_USER_ID")
@@ -298,9 +319,9 @@ def effective_mode(verdict: Verdict, current_mode: str) -> str:
 
 def decide(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[str, Any], Any],
            chat_type: str | None = None, user_id: str | None = None, platform: str | None = None,
-           cron: str | None = None) -> dict[str, str] | None:
+           cron: str | None = None, chat_id: str | None = None) -> dict[str, str] | None:
     """Return a pre_tool_call directive, or None to let the call through. No side effects."""
-    verdict = evaluate(tool_name, args, get_config, chat_type, user_id, platform, cron)
+    verdict = evaluate(tool_name, args, get_config, chat_type, user_id, platform, cron, chat_id=chat_id)
     return directive(verdict, mode(get_config)) if verdict else None
 
 
@@ -310,6 +331,7 @@ def describe(get_config: Callable[[str, Any], Any]) -> str:
         return ", ".join(allowed) if allowed else "nothing"
 
     trusted = trusted_users(get_config)
+    chats = trusted_chats(get_config)
     on_violation = {"block": "block", "approve": "ask the owner to approve (direct chats; elsewhere block)",
                     "observe": "allow and log (observe mode)"}[mode(get_config)]
     return "\n".join([
@@ -319,6 +341,7 @@ def describe(get_config: Callable[[str, Any], Any]) -> str:
         f"• shared chats: {level(get_config, 'group_chats')} (allowed: {names('group_chats')})",
         f"• scheduled jobs: {level(get_config, 'scheduled_jobs')} (allowed: {names('scheduled_jobs')})",
         f"• trusted in shared chats: {len(trusted) if trusted else 'nobody'}",
+        f"• trusted chats, judged like direct chats: {len(chats) if chats else 'none'}",
         "• editing USER.md / MEMORY.md with file or shell tools: judged as add + replace + remove",
         f"• on a violation: {on_violation}",
     ])
@@ -436,7 +459,8 @@ class Shield:
                            user_id=self._session("HERMES_SESSION_USER_ID"),
                            platform=self._session("HERMES_SESSION_PLATFORM"),
                            cron=self._session("HERMES_CRON_SESSION"),
-                           memory_dir=self._memory_dir)
+                           memory_dir=self._memory_dir,
+                           chat_id=self._session("HERMES_SESSION_CHAT_ID"))
         if verdict is None:
             return None
         current = mode(self._get_config)
@@ -576,11 +600,13 @@ class Shield:
         return "Usage: /memory-shield [log [n] | snapshots | restore <n> | whoami]"
 
     def _check_restore_allowed(self) -> None:
-        if is_shared_chat(self._session("HERMES_SESSION_CHAT_TYPE")):
-            raise ShieldError("Restore works only in a direct chat with the agent.")
+        platform = self._session("HERMES_SESSION_PLATFORM")
+        if is_shared_chat(self._session("HERMES_SESSION_CHAT_TYPE")) and not is_trusted_chat(
+                self._get_config, self._session("HERMES_SESSION_CHAT_ID"), platform):
+            raise ShieldError("Restore works only in a direct chat with the agent or in a chat listed in "
+                              "trusted_chats.")
         user_id = self._session("HERMES_SESSION_USER_ID")
-        if trusted_users(self._get_config) and user_id and not is_trusted(
-                self._get_config, user_id, self._session("HERMES_SESSION_PLATFORM")):
+        if trusted_users(self._get_config) and user_id and not is_trusted(self._get_config, user_id, platform):
             raise ShieldError("Only the people listed in trusted_users can restore memory.")
 
     def status_text(self) -> str:
@@ -633,19 +659,33 @@ class Shield:
             target = path.stem.rsplit("-", 1)[-1]
             size = path.stat().st_size
             lines.append(f"#{number} {self._when(path)} {SHORT_LABEL.get(target, target)}, {size} bytes")
-        lines.append("Restore one with '/memory-shield restore <n>' in a direct chat. "
+        lines.append("Restore one with '/memory-shield restore <n>' in a direct chat or a trusted chat. "
                      "The current file is saved first, so a restore can be undone too.")
         return "\n".join(lines)
 
     def whoami_text(self) -> str:
         user_id = self._session("HERMES_SESSION_USER_ID")
-        if not user_id:
-            return "memory-shield: this session has no platform user id (CLI or a scheduled job)."
-        name = self._session("HERMES_SESSION_USER_NAME")
         chat = self._session("HERMES_SESSION_CHAT_TYPE") or "direct"
+        chat_id = self._session("HERMES_SESSION_CHAT_ID") if is_shared_chat(chat) else ""
+        if not user_id and not chat_id:
+            return "memory-shield: this session has no platform user id (CLI or a scheduled job)."
         platform = self._session("HERMES_SESSION_PLATFORM")
-        key = f"{platform}:{user_id}" if platform else user_id
-        trusted = "is" if is_trusted(self._get_config, user_id, platform) else "is not"
-        return (f"You are {key}{f' ({name})' if name else ''} in a {chat} chat; this id {trusted} in trusted_users. "
-                f"Trusted people can let the agent write memory from their own messages in shared chats: "
-                f"add '{key}' to plugins.entries.memory-shield.settings.trusted_users.")
+        if user_id:
+            name = self._session("HERMES_SESSION_USER_NAME")
+            key = f"{platform}:{user_id}" if platform else user_id
+            trusted = "is" if is_trusted(self._get_config, user_id, platform) else "is not"
+            lines = [f"You are {key}{f' ({name})' if name else ''} in a {chat} chat; this id {trusted} in "
+                     f"trusted_users. Trusted people can let the agent write memory from their own messages in "
+                     f"shared chats: add '{key}' to plugins.entries.memory-shield.settings.trusted_users."]
+        else:  # e.g. a Telegram group that Hermes observes: the sender is not passed to plugins
+            lines = [f"This {chat} chat passes no user id to plugins, so trusted_users cannot match here."]
+        if chat_id:
+            key = f"{platform}:{chat_id}" if platform else chat_id
+            if is_trusted_chat(self._get_config, chat_id, platform):
+                lines.append(f"This chat is {key}; it is in trusted_chats, so it is judged like a direct chat. "
+                             f"Remove it from there as soon as anyone else joins.")
+            else:
+                lines.append(f"This chat is {key}; it is not in trusted_chats. Add '{key}' to "
+                             f"plugins.entries.memory-shield.settings.trusted_chats only if nobody but you and the "
+                             f"agent is in this chat: it is then judged like a direct chat.")
+        return "\n".join(lines)

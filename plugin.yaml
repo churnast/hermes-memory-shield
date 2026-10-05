@@ -1,5 +1,5 @@
 name: memory-shield
-version: 0.1.2
+version: 0.1.3
 manifest_version: 2
 description: "Guard rails for the built-in memory tool: the owner's profile is append-only, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
 author: "churnast"
@@ -40,6 +40,11 @@ config_schema:
     default: []
     label: "Trusted people in shared chats"
     description: "Numeric user ids (see /memory-shield whoami). Their own messages in groups may write memory within the levels above."
+  trusted_chats:
+    type: list
+    default: []
+    label: "Chats with only you and the agent"
+    description: "Chat ids (see /memory-shield whoami in that chat), judged like a direct chat. For owner-only groups where Hermes does not pass the sender, such as Telegram groups it observes. Never list a chat with anyone else in it."
   audit_log:
     type: bool
     default: true

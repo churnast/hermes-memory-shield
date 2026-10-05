@@ -30,7 +30,7 @@ Restart the gateway and type `/memory-shield` in any chat to see the active poli
 
 | Where | Your profile (`USER.md`) | Agent notes (`MEMORY.md`) |
 |---|---|---|
-| Direct chat, CLI | add only | add and update, no delete |
+| Direct chat, CLI, a chat listed in `trusted_chats` | add only | add and update, no delete |
 | Group, forum topic, channel, guild thread, webhook run | read only | read only |
 | Scheduled job (cron) | as in a direct chat, unless you set `scheduled_jobs` | as in a direct chat, unless you set `scheduled_jobs` |
 
@@ -41,7 +41,7 @@ A blocked call returns a short explanation the model can act on, for example "ad
 - **Edits and deletions** that the level of that store does not allow, checked operation by operation inside batches.
 - **Deletion in disguise.** Replacing an entry with empty or placeholder text ("", "n/a", "[deleted]") counts as removing it.
 - **Side doors.** `write_file`, `patch`, `terminal` and `execute_code` calls that would change `USER.md` or `MEMORY.md` directly are judged like the memory tool itself. File and shell detection is best effort.
-- **Strangers in groups.** Memory is read-only in shared chats, except for the people you list in `trusted_users`.
+- **Strangers in groups.** Memory is read-only in shared chats, except for the people you list in `trusted_users` and the owner-only chats you list in `trusted_chats`.
 
 ## Undo
 
@@ -49,7 +49,7 @@ Right before an allowed edit or deletion goes through, Memory Shield keeps a cop
 
 ```text
 /memory-shield snapshots     list them, newest first
-/memory-shield restore 3     put snapshot #3 back (direct chat only)
+/memory-shield restore 3     put snapshot #3 back (direct or trusted chat only)
 ```
 
 The current file is saved before a restore, so a restore can be undone too. Start a new session with `/new` afterwards, so the agent reads the restored memory.
@@ -78,6 +78,7 @@ plugins:
         scheduled_jobs: "off"           # applied on top in cron runs; "off" adds nothing
         mode: block                     # block | approve | observe
         trusted_users: ["telegram:123456789"]   # /memory-shield whoami shows yours
+        trusted_chats: []               # owner-only chats, see below
         audit_log: true
         snapshots: 20                   # per memory file; 0 turns snapshots off
 ```
@@ -90,8 +91,11 @@ plugins:
 | `scheduled_jobs` | `off` | Extra limit in cron runs, which often read web pages or feeds with nobody watching. |
 | `mode` | `block` | `block` refuses with a hint. `approve` asks you through Hermes' approval prompt in direct chats and blocks elsewhere. `observe` only logs. |
 | `trusted_users` | `[]` | People whose own messages may write memory from shared chats, as `platform:user_id`. |
+| `trusted_chats` | `[]` | Chats that only you and the agent are in, as `platform:chat_id`. They are judged like a direct chat. |
 | `audit_log` | `true` | Keeps the last 500 refused or flagged writes for `/memory-shield log`. |
 | `snapshots` | `20` | Copies kept per memory file for `/memory-shield restore`. |
+
+**Owner-only groups.** In Telegram groups that Hermes observes (`observe_unmentioned_group_messages: true`), Hermes does not pass the sender to plugins, so `trusted_users` cannot match there: your own messages get the `group_chats` limit like everyone else's. If only you and the agent are in the group, for example a private group with forum topics, add it to `trusted_chats`: `/memory-shield whoami` in that group shows the key, such as `telegram:-1001234567890`. Never list a chat with anyone else in it, people or other bots: whatever is written there is treated as if you said it in a direct chat.
 
 Levels:
 
@@ -111,8 +115,8 @@ Each approval request carries its own key, so approving one change never unlocks
 | `/memory-shield` | Policy, log and snapshot status. |
 | `/memory-shield log [n]` | The last refused or flagged writes, who asked and where. |
 | `/memory-shield snapshots` | Saved copies, newest first. |
-| `/memory-shield restore <n>` | Puts a copy back. Direct chat only, and only for trusted people when `trusted_users` is set. |
-| `/memory-shield whoami` | Your platform user id, ready to paste into `trusted_users`. |
+| `/memory-shield restore <n>` | Puts a copy back. Direct chats and `trusted_chats` only, and only for trusted people when `trusted_users` is set. |
+| `/memory-shield whoami` | Your platform user id, ready to paste into `trusted_users`; in a shared chat also the chat key for `trusted_chats`. |
 
 ## How it compares to `memory.write_approval`
 
@@ -135,7 +139,7 @@ Hermes Agent 0.21.5 or newer. No Python dependencies.
 ## Privacy and safety
 
 - **One `pre_tool_call` hook.** It inspects calls to `memory`, and calls to `write_file`, `patch`, `terminal` and `execute_code` only to see whether they touch `USER.md` or `MEMORY.md`. Everything else passes untouched.
-- **Session details read:** chat type, platform, user id and name, chat name, and whether the run is a scheduled job.
+- **Session details read:** chat type, id and name, platform, user id and name, and whether the run is a scheduled job.
 - **Files** in `<HERMES_HOME>/plugin-data/memory-shield/`: `audit.jsonl` (the last 500 refused or flagged writes: time, who, where and a 160-character excerpt; `audit_log: false` turns it off) and `snapshots/` (copies of `USER.md` and `MEMORY.md`; `snapshots: 0` turns them off). Reads the two memory files to take the copies, and `/memory-shield restore` writes one back.
 - No network, no credentials, no background processes, no telemetry.
 - Memory provider plugins (Honcho, Mem0 and others) have their own tools, which this plugin does not cover yet.
@@ -147,6 +151,7 @@ Hermes Agent 0.21.5 or newer. No Python dependencies.
 | "'replace' is not allowed for the owner's profile" | Working as intended. Edit `~/.hermes/memories/USER.md` yourself, or set `user_profile: no_delete`. |
 | `mode: approve` never asks | Hermes skips approvals when `approvals.mode` is off or YOLO is on. Use `block`. |
 | The agent will not remember what you say in a group | Add yourself to `trusted_users`; `/memory-shield whoami` shows the id. |
+| The same in your own Telegram group, although you are in `trusted_users` | Hermes does not pass the sender in groups it observes. If only you and the agent are in it, add the chat to `trusted_chats`. |
 | A restore did not change what the agent says | Start a new session with `/new`. |
 
 ## Background reading

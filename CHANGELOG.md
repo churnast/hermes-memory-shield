@@ -6,6 +6,19 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [0.1.3] (2026-10-05)
+
+### Added
+
+- `trusted_chats`: chats that only the owner and the agent are in, such as a private Telegram group with forum
+  topics, are judged like a direct chat, and `/memory-shield restore` works there. In Telegram groups that Hermes
+  observes, the sender is not passed to plugins, so `trusted_users` could not match there and the owner's own
+  memory writes were blocked like a stranger's. `/memory-shield whoami` shows the key of the current chat.
+
+### Fixed
+
+- `platform:id` entries in `trusted_users` now match ids that contain a colon themselves, such as Matrix ids.
+
 ## [0.1.2] (2026-10-05)
 
 ### Fixed
@@ -34,7 +47,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/churnast/hermes-memory-shield/releases/tag/v0.1.0

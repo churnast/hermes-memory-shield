@@ -146,6 +146,58 @@ def test_trusted_users_can_be_bound_to_a_platform():
     assert shield.decide("memory", add, trusted, chat_type="group", user_id="222", platform="discord") is None
 
 
+# a Telegram group that Hermes observes: the sender id is not passed, only the chat id
+OWNER_GROUP = {"chat_type": "group", "chat_id": "-1001234567890", "platform": "telegram", "user_id": ""}
+
+
+def test_a_trusted_chat_is_judged_like_a_direct_chat():
+    owner_only = cfg(trusted_chats=["telegram:-1001234567890"])
+    for target in ("user", "memory"):
+        add = {"action": "add", "target": target, "content": "Owner moved to Lisbon"}
+        assert shield.decide("memory", add, owner_only, **OWNER_GROUP) is None
+        assert "shared chat" in shield.decide("memory", add, DEFAULT, **OWNER_GROUP)["message"]
+    remove = {"action": "remove", "target": "user", "old_text": "tea"}
+    out = shield.decide("memory", remove, owner_only, **OWNER_GROUP)
+    assert out and "shared chat" not in out["message"]  # the profile stays append-only, as in a direct chat
+    verdict = shield.evaluate("memory", remove, owner_only, **OWNER_GROUP)
+    assert verdict.context == "direct" and verdict.where == "the owner's profile"
+    replace = {"action": "replace", "target": "user", "old_text": "tea", "content": "Prefers coffee"}
+    approve = cfg(mode="approve", trusted_chats=["telegram:-1001234567890"])
+    assert shield.decide("memory", replace, approve, **OWNER_GROUP)["action"] == "approve"
+
+
+def test_trusted_chats_match_platform_and_chat_id():
+    add = {"action": "add", "target": "user", "content": "Owner is in Bangkok"}
+    other_chat = dict(OWNER_GROUP, chat_id="-1009876543210")
+    other_platform = dict(OWNER_GROUP, platform="discord")
+    bound = cfg(trusted_chats=["telegram:-1001234567890"])
+    assert shield.decide("memory", add, bound, **OWNER_GROUP) is None
+    assert "shared chat" in shield.decide("memory", add, bound, **other_chat)["message"]
+    assert "shared chat" in shield.decide("memory", add, bound, **other_platform)["message"]
+    assert shield.decide("memory", add, bound, **dict(OWNER_GROUP, chat_id=""))
+    bare = cfg(trusted_chats=["-1001234567890"])  # a bare id matches on any platform
+    assert shield.decide("memory", add, bare, **OWNER_GROUP) is None
+    assert shield.decide("memory", add, bare, **other_platform) is None
+    assert shield.decide("memory", add, bare, **other_chat)
+
+
+def test_trusted_chats_accepts_a_string_or_a_number():
+    listed = cfg(trusted_chats="telegram:-1001234567890, -1009876543210")
+    assert shield.trusted_chats(listed) == ["telegram:-1001234567890", "-1009876543210"]
+    assert shield.trusted_chats(cfg(trusted_chats=-1001234567890)) == ["-1001234567890"]
+    assert shield.trusted_chats(DEFAULT) == []
+    spaced = cfg(trusted_chats="telegram:-1001234567890 discord:42")
+    add = {"action": "add", "target": "memory", "content": "Owner reads on Sundays"}
+    assert shield.decide("memory", add, spaced, chat_type="thread", chat_id="42", platform="discord") is None
+
+
+def test_ids_with_a_colon_match_in_the_platform_form():
+    matrix = cfg(trusted_users=["matrix:@owner:example.org"], trusted_chats=["matrix:!room:example.org"])
+    assert shield.is_trusted(matrix, "@owner:example.org", "matrix")
+    assert shield.is_trusted_chat(matrix, "!room:example.org", "matrix")
+    assert not shield.is_trusted_chat(matrix, "!room:example.org", "telegram")
+
+
 @pytest.mark.parametrize("tool,args", [
     ("write_file", {"path": "~/.hermes/memories/USER.md", "content": ""}),
     ("patch", {"path": "/srv/hermes/memories/MEMORY.md", "old_string": "a", "new_string": "b"}),
@@ -218,6 +270,15 @@ def test_chat_type_and_user_come_from_the_session(monkeypatch):
     assert shield.decide("memory", {"action": "add", "target": "memory"}, cfg(trusted_users=["111"])) is None
     monkeypatch.setenv("HERMES_SESSION_CHAT_TYPE", "dm")
     assert shield.decide("memory", {"action": "add", "target": "memory"}, DEFAULT) is None
+
+
+def test_chat_id_comes_from_the_session(monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_CHAT_TYPE", "group")
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "-1001234567890")
+    add = {"action": "add", "target": "memory", "content": "Owner reads on Sundays"}
+    assert shield.decide("memory", add, DEFAULT)
+    assert shield.decide("memory", add, cfg(trusted_chats=["telegram:-1001234567890"])) is None
 
 
 def test_excerpt_is_short_and_names_the_operation():
@@ -364,15 +425,50 @@ def test_restore_is_refused_in_groups_for_strangers_and_for_bad_numbers(tmp_path
     assert "Say which snapshot" in owner.command("restore")
 
 
+TRUSTED_GROUP = {"HERMES_SESSION_CHAT_TYPE": "group", "HERMES_SESSION_CHAT_ID": "-1001234567890",
+                 "HERMES_SESSION_USER_ID": "", "HERMES_SESSION_USER_NAME": ""}
+
+
+def test_a_trusted_chat_writes_and_restores_like_a_direct_chat(tmp_path):
+    settings = {"trusted_users": ["telegram:111"], "trusted_chats": ["telegram:-1001234567890"]}
+    service, memories, _ = make(tmp_path, TRUSTED_GROUP, **settings)
+    original = (memories / "USER.md").read_text(encoding="utf-8")
+    assert service.check("memory", {"action": "add", "target": "user", "content": "Has a cat"}) is None
+    service.snapshot("user")
+    (memories / "USER.md").write_text("wiped", encoding="utf-8")
+    assert "Restored the owner profile from snapshot #1" in service.command("restore 1")
+    assert (memories / "USER.md").read_text(encoding="utf-8") == original
+    other, _, _ = make(tmp_path / "other", dict(TRUSTED_GROUP, HERMES_SESSION_CHAT_ID="-1009876543210"), **settings)
+    assert other.check("memory", {"action": "add", "target": "user", "content": "Has a cat"})["action"] == "block"
+    assert "only in a direct chat" in other.command("restore 1")
+
+
 def test_status_whoami_and_usage(tmp_path):
     service, _, _ = make(tmp_path, trusted_users=["111"])
     service.check("memory", {"action": "remove", "target": "user", "old_text": "tea"})
     status = service.command("")
     assert "owner profile: append_only" in status and "trusted in shared chats: 1" in status
+    assert "trusted chats, judged like direct chats: none" in status
     assert "log: 1 event(s)" in status and "snapshots: 0 kept" in status
     whoami = service.command("whoami")
     assert "You are telegram:111 (Owner)" in whoami and "this id is in trusted_users" in whoami
     assert service.command("dance").startswith("Usage:")
+
+
+def test_whoami_shows_the_chat_key_in_shared_chats(tmp_path):
+    service, _, _ = make(tmp_path, TRUSTED_GROUP)
+    text = service.command("whoami")
+    assert "trusted_users cannot match here" in text
+    assert "This chat is telegram:-1001234567890; it is not in trusted_chats" in text
+    assert "only if nobody but you and the agent is in this chat" in text
+    listed, _, _ = make(tmp_path / "listed", TRUSTED_GROUP, trusted_chats=["telegram:-1001234567890"])
+    assert "it is in trusted_chats, so it is judged like a direct chat" in listed.command("whoami")
+    assert "trusted chats, judged like direct chats: 1" in listed.command("")
+    both, _, _ = make(tmp_path / "both", {"HERMES_SESSION_CHAT_TYPE": "group", "HERMES_SESSION_CHAT_ID": "-1009"})
+    first, second = both.command("whoami").splitlines()
+    assert first.startswith("You are telegram:111 (Owner) in a group chat") and "telegram:-1009" in second
+    dm, _, _ = make(tmp_path / "dm", {"HERMES_SESSION_CHAT_ID": "111"})
+    assert "trusted_chats" not in dm.command("whoami")  # a direct chat needs no entry
 
 
 def test_a_broken_data_dir_never_changes_the_decision(tmp_path):
