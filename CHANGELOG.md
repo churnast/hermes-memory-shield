@@ -6,6 +6,17 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [0.1.4] (2026-10-05)
+
+### Fixed
+
+- `scheduled_jobs` is listed in the plugin's settings, so Hermes Desktop shows it in the settings form.
+- The `trusted_users` hint asks for ids as `platform:id`, like the README and `/memory-shield whoami`.
+
+### Added
+
+- README: how to update, switch off and remove the plugin.
+
 ## [0.1.3] (2026-10-05)
 
 ### Added
@@ -47,7 +58,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.0...v0.1.1

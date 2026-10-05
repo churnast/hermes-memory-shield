@@ -132,6 +132,17 @@ Hermes has a built-in switch, `memory.write_approval: true`, that holds every me
 
 Hermes also scans memory entries for prompt-injection patterns before saving them. That check keeps working underneath.
 
+## Update and remove
+
+```bash
+hermes plugins update memory-shield
+hermes plugins disable memory-shield
+hermes plugins remove memory-shield
+```
+
+Switching it off stops the checks at once (after a gateway restart); snapshots and the log stay in
+`plugin-data/memory-shield/` until you delete that folder.
+
 ## Requirements
 
 Hermes Agent 0.21.5 or newer. No Python dependencies.

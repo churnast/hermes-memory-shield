@@ -1,5 +1,5 @@
 name: memory-shield
-version: 0.1.3
+version: 0.1.4
 manifest_version: 2
 description: "Guard rails for the built-in memory tool: the owner's profile is append-only, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
 author: "churnast"
@@ -29,6 +29,12 @@ config_schema:
     default: read_only
     label: "Shared chats"
     description: "Applied on top of the levels above in groups, channels, forum topics, guild threads and webhook runs."
+  scheduled_jobs:
+    type: str
+    choices: ["off", read_only, append_only, no_delete]
+    default: "off"
+    label: "Scheduled jobs"
+    description: "Applied on top of the levels above in cron runs. off: no extra limit."
   mode:
     type: str
     choices: [block, approve, observe]
@@ -39,7 +45,7 @@ config_schema:
     type: list
     default: []
     label: "Trusted people in shared chats"
-    description: "Numeric user ids (see /memory-shield whoami). Their own messages in groups may write memory within the levels above."
+    description: "Ids as platform:id, for example telegram:123456789 (/memory-shield whoami shows yours). Their own messages in groups may write memory within the levels above."
   trusted_chats:
     type: list
     default: []
