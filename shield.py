@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -34,15 +35,17 @@ SHELL_TOOLS = {"terminal": "command", "execute_code": "code"}
 WATCHED_TOOLS = frozenset({TOOL, *DIRECT_EDIT_TOOLS, *SHELL_TOOLS})
 ACTIONS = ("add", "replace", "remove")
 DESTRUCTIVE = frozenset({"replace", "remove"})
+OWNER_EDITS = "owner_edits"
 LEVELS: dict[str, frozenset] = {
     "off": frozenset(ACTIONS),
     "no_delete": frozenset({"add", "replace"}),
+    OWNER_EDITS: frozenset({"add"}),  # plus "replace" for the owner in a direct chat, see evaluate()
     "append_only": frozenset({"add"}),
     "read_only": frozenset(),
 }
 MODES = ("block", "approve", "observe")
 DEFAULTS = {
-    "user_profile": "append_only",   # target "user": what the agent knows about its owner
+    "user_profile": OWNER_EDITS,     # target "user": what the agent knows about its owner
     "agent_notes": "no_delete",      # target "memory": the agent's own notes
     "group_chats": "read_only",      # any shared chat: the stricter of this and the target level
     "scheduled_jobs": "off",         # cron runs: the stricter of this and the target level
@@ -74,13 +77,34 @@ STUB_WORDS = frozenset({
     # Spanish, Portuguese, German, French
     "borrado", "eliminado", "apagado", "gelöscht", "entfernt", "supprimé", "vide",
 })
-_SHELL_WRITE = re.compile(
-    r">|\b(?:rm|mv|cp|tee|truncate|dd|unlink|shred|install|ln|rsync)\b|\bsed\s+-[a-zA-Z]*i|\bperl\s+-[a-zA-Z]*i"
-    r"|-delete\b|write_text|write_bytes|\.write\(|open\([^)]*['\"][wax+]"
-    r"|os\.(?:remove|replace|rename|unlink|rmdir)|shutil\.|rmtree|\.unlink\(")
 _SHELL_MEMORY_DIR = re.compile(r"memories|\.hermes|HERMES_HOME")
-# The memory folder itself, for commands that wipe or move it without naming a file.
-_SHELL_MEMORY_FOLDER = re.compile(r"(?:\.hermes|HERMES_HOME|hermes_home\(\))[^\s'\"]*/memories\b|memories/\*")
+# The memory folder itself, as a shell word, for commands that wipe or move it without naming a file.
+_SHELL_MEMORY_FOLDER = re.compile(r"(?:\.hermes|HERMES_HOME|hermes_home\(\))[^\s'\"]*/memories/?$|memories/\*$")
+# The same two things inside a Python expression, where the path may be built from pieces.
+_PY_MEMORY_FILE = re.compile(r"(?<![\w.])(USER|MEMORY)\.md(?![\w.])")
+_PY_MEMORY_FOLDER = re.compile(r"(?:\.hermes|HERMES_HOME|hermes_home\(\))[^\n]*?memories(?![\w.\-/])")
+# Shell commands judged by where their target is. "any": any memory path among the arguments counts
+# (the file is removed, moved, truncated or edited in place); "last": only a memory path as the last
+# argument, the destination, counts, so copying a memory file somewhere else passes.
+_SHELL_ANY_ARG = frozenset({"rm", "rmdir", "unlink", "shred", "truncate", "trash", "mv", "tee"})
+_SHELL_LAST_ARG = frozenset({"cp", "install", "rsync", "ln"})
+_SHELL_IN_PLACE = frozenset({"sed", "perl"})
+_SHELL_PREFIXES = frozenset({"sudo", "doas", "command", "builtin", "nohup", "env", "exec", "time", "nice"})
+_SHELL_SPLIT = re.compile(r"\|\||&&|[;|\n]")
+_SHELL_REDIRECT = re.compile(r"(?<![<\w])&?\d?>{1,2}\|?\s*(\"[^\"]*\"|'[^']*'|\S+)")
+_SHELL_ALIAS = re.compile(r"^\s*(?:export\s+)?([A-Za-z_]\w*)=(\S+)")
+_PY_ALIAS = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(.+)$")
+_PY_STATEMENT = re.compile(r"[;\n]")
+# Python calls that change or delete a file: methods of the path before the dot, and functions of the
+# path in their arguments.
+_PY_WRITE_METHOD = re.compile(r"\.(?:write_text|write_bytes|unlink|rmdir|rename|truncate)\(")
+_PY_WRITE_FUNCTION = re.compile(r"os\.(?:remove|unlink|rmdir|rename|replace|truncate)\(|shutil\.(?:rmtree|move)\("
+                                r"|send2trash\(")
+_PY_ARG = r"((?:[^,()]|\([^()]*\))+)"
+_PY_OPEN = re.compile(r"\bopen\(\s*" + _PY_ARG + r"\s*,\s*(?:mode\s*=\s*)?['\"]([^'\"]*)['\"]")
+_PY_COPY = re.compile(r"shutil\.copy\w*\(((?:[^()]|\([^()]*\))*)\)")
+_PY_STRING = re.compile(r"'([^'\n]*)'|\"([^\"\n]*)\"")
+_SHELL_REDIRECT_WORD = re.compile(r"^(?:&?\d?>{1,2}\|?|<{1,3})")
 
 
 class ShieldError(Exception):
@@ -88,6 +112,19 @@ class ShieldError(Exception):
 
 
 # --- Policy (pure) ----------------------------------------------------------------------------
+
+
+def background_review() -> bool:
+    """True inside Hermes' unattended self-improvement review: the fork that reads the finished
+    conversation and tidies memory and skills with nobody watching. Hermes marks it with a context
+    variable (tools/skill_provenance.py) that reaches pre_tool_call hooks; a review the owner asked for
+    with /refine is attended and does not count. False without Hermes."""
+    try:
+        from tools.skill_provenance import is_unattended_review  # type: ignore
+
+        return bool(is_unattended_review())
+    except Exception:
+        return False
 
 
 def session_value(name: str) -> str:
@@ -204,29 +241,156 @@ def memory_file_target(tool_name: str, args: dict[str, Any],
         return None
     if tool_name in SHELL_TOOLS:
         code = str(args.get(SHELL_TOOLS[tool_name]) or "")
-        if not _SHELL_WRITE.search(code):
-            return None
-        hits = [target for target, name in MEMORY_FILES.items() if name in code]
-        if hits and _SHELL_MEMORY_DIR.search(code):
-            return hits[0]  # "user" first: the stricter store when both are named
-        if _SHELL_MEMORY_FOLDER.search(code):
-            return "user"  # the whole folder: judged by the stricter store
+        hits = _shell_targets(code) | _python_targets(code)
+        if hits:
+            return "user" if "user" in hits else "memory"  # "user" first: the stricter store when both are named
     return None
 
 
-def _hint(target: str, allowed: Iterable[str], direct_edit: bool = False) -> str:
+def _memory_token(token: str, aliases: dict[str, str], bare: bool = False) -> str | None:
+    """'user' or 'memory' when a shell word names a memory file, 'user' when it names the memory folder."""
+    text = token.strip("'\"")
+    for name, value in aliases.items():
+        text = text.replace("${" + name + "}", value).replace("$" + name, value)
+    for target, name in MEMORY_FILES.items():
+        if text.rsplit("/", 1)[-1] == name and (_SHELL_MEMORY_DIR.search(text) or bare):
+            return target
+    return "user" if _SHELL_MEMORY_FOLDER.search(text) else None
+
+
+def _operands(words: list[str]) -> list[str]:
+    """Arguments without options and without redirections and what they point at."""
+    out = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+            continue
+        if _SHELL_REDIRECT_WORD.match(word):
+            skip = _SHELL_REDIRECT_WORD.fullmatch(word) is not None  # a bare operator takes the next word
+            continue
+        if not word.startswith("-"):
+            out.append(word)
+    return out
+
+
+def _shell_targets(code: str, nested: bool = False) -> set[str]:
+    """Memory files a shell command writes into, removes or moves: a redirection or tee into the file, an
+    in-place edit, a removal or move of the file or the folder, or a copy whose destination is one of them.
+    Reading a memory file, copying it elsewhere or redirecting elsewhere does not count. Quoted strings
+    are read once as shell text too, for commands passed to python -c, subprocess or os.system."""
+    hits: set[str] = set()
+    aliases: dict[str, str] = {}
+    in_memory_dir = False
+    for segment in _SHELL_SPLIT.split(code):
+        segment = segment.strip()
+        if not segment:
+            continue
+        for match in _SHELL_REDIRECT.finditer(segment):
+            target = _memory_token(match.group(1), aliases, in_memory_dir)
+            if target and not match.group(1).startswith("&"):
+                hits.add(target)
+        try:
+            words = shlex.split(segment, posix=True)
+        except ValueError:
+            words = segment.split()
+        alias = _SHELL_ALIAS.match(segment)
+        if alias and _memory_token(alias.group(2), aliases):
+            aliases[alias.group(1)] = alias.group(2).strip("'\"")
+        while words and (words[0] in _SHELL_PREFIXES or ("=" in words[0] and not words[0].startswith("-"))):
+            words = words[1:]
+        if not words:
+            continue
+        command = words[0].rsplit("/", 1)[-1]
+        options = [w for w in words[1:] if w.startswith("-")]
+        operands = _operands(words[1:])
+        if command == "cd":
+            in_memory_dir = bool(operands) and _memory_token(operands[0], aliases) == "user" and \
+                MEMORY_FILES["user"] not in operands[0] and MEMORY_FILES["memory"] not in operands[0]
+            continue
+        found = [_memory_token(w, aliases, in_memory_dir) for w in operands]
+        if command in _SHELL_ANY_ARG or (command in _SHELL_IN_PLACE and any(o.startswith("-") and "i" in o[1:3]
+                                                                            for o in options)):
+            hits.update(t for t in found if t)
+        elif command in _SHELL_LAST_ARG and found and found[-1]:
+            hits.add(found[-1])
+        elif command == "dd":
+            hits.update(t for t in (_memory_token(w[3:], aliases, in_memory_dir) for w in words if w.startswith("of="))
+                        if t)
+        elif command == "find" and any(found) and ("-delete" in words or any(w in ("rm", "mv") for w in words)):
+            hits.update(t for t in found if t)
+        elif command == "xargs" and any(w in _SHELL_ANY_ARG for w in words[1:]):
+            hits.update(t for t in (_memory_token(w, aliases) for w in code.split()) if t)
+    if not nested:
+        for match in _PY_STRING.finditer(code):
+            hits |= _shell_targets(match.group(1) or match.group(2) or "", nested=True)
+    return hits
+
+
+def _python_targets(code: str) -> set[str]:
+    """Memory files that Python code opens for writing, rewrites, deletes, moves or copies over, statement by
+    statement; a name assigned a memory path earlier in the code counts as that path."""
+    hits: set[str] = set()
+    aliases: dict[str, str] = {}
+
+    def target_in(text: str) -> str | None:
+        for name, value in aliases.items():
+            text = re.sub(rf"\b{name}\b", lambda _match, value=value: value, text)
+        found = _PY_MEMORY_FILE.search(text)
+        if found and _SHELL_MEMORY_DIR.search(text):
+            return "user" if found.group(1) == "USER" else "memory"
+        return "user" if _PY_MEMORY_FOLDER.search(text) else None
+
+    for statement in _PY_STATEMENT.split(code):
+        statement = statement.strip()
+        if not statement:
+            continue
+        alias = _PY_ALIAS.match(statement)
+        if alias and target_in(alias.group(2)):
+            aliases[alias.group(1)] = alias.group(2)
+        for match in _PY_OPEN.finditer(statement):
+            target = target_in(match.group(1))
+            if target and any(flag in match.group(2) for flag in "wax+"):
+                hits.add(target)
+        for match in _PY_COPY.finditer(statement):
+            destination = ",".join(match.group(1).split(",")[1:])
+            target = target_in(destination)
+            if target:
+                hits.add(target)
+        for match in _PY_WRITE_METHOD.finditer(statement):
+            target = target_in(statement[:match.start()])  # the path before the dot
+            if target:
+                hits.add(target)
+        for match in _PY_WRITE_FUNCTION.finditer(statement):
+            target = target_in(statement[match.end():])  # the path in the arguments
+            if target:
+                hits.add(target)
+    return hits
+
+
+def _hint(target: str, allowed: Iterable[str], direct_edit: bool = False, context: str = "direct") -> str:
     allowed = set(allowed)
     if direct_edit:
         return ("Memory files are changed only through the memory tool, which keeps this policy and a "
                 "snapshot. Do not edit USER.md or MEMORY.md with file or shell tools.")
+    if context == "review":
+        return ("The background review does not change what the agent knows about the owner. Leave the "
+                "owner's profile as it is.")
     if not allowed:
         return "Do not write to memory here. If something should be remembered, tell the owner in a direct chat."
     if allowed == {"add"}:
         if target == "user":
-            return ("Existing facts about the owner cannot be changed or deleted by the agent. If something is "
-                    "outdated, add a new dated entry with the correction and tell the owner what looks wrong.")
+            if context == "direct":
+                return ("Existing facts about the owner cannot be changed or deleted by the agent. If something "
+                        "is outdated, add a new dated entry with the correction and tell the owner what looks "
+                        "wrong.")
+            return ("Existing facts about the owner are changed only when the owner asks in a direct chat. "
+                    "Add a new dated entry with the correction instead.")
         return "Only new entries can be added here. Add a corrected entry instead of editing the old one."
     if allowed == {"add", "replace"}:
+        if target == "user":
+            return ("Facts about the owner cannot be deleted, and replacing one with empty or placeholder text "
+                    "counts as deleting. Replace an outdated fact with the corrected one instead.")
         return ("Entries cannot be deleted, and replacing one with empty or placeholder text counts as deleting. "
                 "Replace an outdated entry with an updated version instead.")
     return ""
@@ -239,7 +403,7 @@ class Verdict:
     denied: list[str]
     where: str
     hint: str
-    context: str = "direct"      # direct | shared | scheduled
+    context: str = "direct"      # direct | shared | stranger | scheduled | review
     fingerprint: str = ""
 
     @property
@@ -259,9 +423,11 @@ def _fingerprint(tool_name: str, args: dict[str, Any]) -> str:
 def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[str, Any], Any],
              chat_type: str | None = None, user_id: str | None = None, platform: str | None = None,
              cron: str | None = None, memory_dir: Callable[[], Path] | None = None,
-             chat_id: str | None = None) -> Verdict | None:
+             chat_id: str | None = None, review: bool | None = None) -> Verdict | None:
     """What a call asks to change in memory and which of it the policy denies; None when the call
-    does not touch memory. A chat listed in trusted_chats is judged like a direct chat."""
+    does not touch memory. A chat listed in trusted_chats is judged like a direct chat. Once
+    trusted_users is set, a direct chat with someone not listed there is judged like a shared chat;
+    a session without a user id (the CLI) still counts as the owner."""
     if tool_name not in WATCHED_TOOLS or not isinstance(args, dict):
         return None
     direct_edit = tool_name != TOOL
@@ -277,7 +443,8 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
         actions = requested_actions(args)
         if not actions:
             return None
-    allowed = set(LEVELS[level(get_config, TARGET_SETTING[target])])
+    target_level = level(get_config, TARGET_SETTING[target])
+    allowed = set(LEVELS[target_level])
     where = TARGET_LABEL[target] + (" (editing the file directly)" if direct_edit else "")
     if chat_type is None:
         chat_type = session_value("HERMES_SESSION_CHAT_TYPE")
@@ -287,21 +454,34 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
         cron = session_value("HERMES_CRON_SESSION")
     if chat_id is None:
         chat_id = session_value("HERMES_SESSION_CHAT_ID")
+    if user_id is None:
+        user_id = session_value("HERMES_SESSION_USER_ID")
+    if review is None:
+        review = background_review()
+    trusted = trusted_users(get_config)
     context = "direct"
-    if is_shared_chat(chat_type) and not is_trusted_chat(get_config, chat_id, platform):
+    if review and target == "user" and target_level != "off":
+        context = "review"
+        allowed = set()
+        where += " (in the background review)"
+    elif is_shared_chat(chat_type) and not is_trusted_chat(get_config, chat_id, platform):
         context = "shared"
-        if user_id is None:
-            user_id = session_value("HERMES_SESSION_USER_ID")
         if not is_trusted(get_config, user_id, platform):
             allowed &= LEVELS[level(get_config, "group_chats")]
             where += " (in a shared chat)"
+    elif trusted and user_id and not is_trusted(get_config, user_id, platform):
+        context = "stranger"
+        allowed &= LEVELS[level(get_config, "group_chats")]
+        where += " (in a direct chat with someone not in trusted_users)"
     elif str(cron or "").strip().lower() in TRUTHY:
         context = "scheduled"
         allowed &= LEVELS[level(get_config, "scheduled_jobs")]
         where += " (in a scheduled job)"
+    if target_level == OWNER_EDITS and context == "direct":
+        allowed.add("replace")  # the owner, in a direct chat, the CLI or a trusted chat, may correct entries
     denied = sorted({a for a in actions if a not in allowed}, key=ACTIONS.index)
-    return Verdict(target, actions, denied, where, _hint(target, allowed, direct_edit) if denied else "",
-                   context, _fingerprint(tool_name, args))
+    hint = _hint(target, allowed, direct_edit, context) if denied else ""
+    return Verdict(target, actions, denied, where, hint, context, _fingerprint(tool_name, args))
 
 
 def directive(verdict: Verdict, current_mode: str) -> dict[str, str] | None:
@@ -322,15 +502,19 @@ def effective_mode(verdict: Verdict, current_mode: str) -> str:
 
 def decide(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[str, Any], Any],
            chat_type: str | None = None, user_id: str | None = None, platform: str | None = None,
-           cron: str | None = None, chat_id: str | None = None) -> dict[str, str] | None:
+           cron: str | None = None, chat_id: str | None = None, review: bool | None = None) -> dict[str, str] | None:
     """Return a pre_tool_call directive, or None to let the call through. No side effects."""
-    verdict = evaluate(tool_name, args, get_config, chat_type, user_id, platform, cron, chat_id=chat_id)
+    verdict = evaluate(tool_name, args, get_config, chat_type, user_id, platform, cron, chat_id=chat_id,
+                       review=review)
     return directive(verdict, mode(get_config)) if verdict else None
 
 
 def describe(get_config: Callable[[str, Any], Any]) -> str:
     def names(key: str) -> str:
-        allowed = [a for a in ACTIONS if a in LEVELS[level(get_config, key)]]
+        current = level(get_config, key)
+        allowed = [a for a in ACTIONS if a in LEVELS[current]]
+        if current == OWNER_EDITS:
+            return "add; replace too for the owner in a direct chat"
         return ", ".join(allowed) if allowed else "nothing"
 
     trusted = trusted_users(get_config)
@@ -343,7 +527,8 @@ def describe(get_config: Callable[[str, Any], Any]) -> str:
         f"• agent notes: {level(get_config, 'agent_notes')} (allowed: {names('agent_notes')})",
         f"• shared chats: {level(get_config, 'group_chats')} (allowed: {names('group_chats')})",
         f"• scheduled jobs: {level(get_config, 'scheduled_jobs')} (allowed: {names('scheduled_jobs')})",
-        f"• trusted in shared chats: {len(trusted) if trusted else 'nobody'}",
+        f"• trusted people: {len(trusted) if trusted else 'nobody listed'}"
+        + (" (direct chats with anyone else are judged like a shared chat)" if trusted else ""),
         f"• trusted chats, judged like direct chats: {len(chats) if chats else 'none'}",
         "• editing USER.md / MEMORY.md with file or shell tools: judged as add + replace + remove",
         f"• on a violation: {on_violation}",
@@ -463,7 +648,7 @@ class Shield:
                            platform=self._session("HERMES_SESSION_PLATFORM"),
                            cron=self._session("HERMES_CRON_SESSION"),
                            memory_dir=self._memory_dir,
-                           chat_id=self._session("HERMES_SESSION_CHAT_ID"))
+                           chat_id=self._session("HERMES_SESSION_CHAT_ID"), review=background_review())
         if verdict is None:
             return None
         current = mode(self._get_config)
@@ -688,8 +873,10 @@ class Shield:
             key = f"{platform}:{user_id}" if platform else user_id
             trusted = "is" if is_trusted(self._get_config, user_id, platform) else "is not"
             lines = [f"You are {key}{f' ({name})' if name else ''} in a {chat} chat; this id {trusted} in "
-                     f"trusted_users. Trusted people can let the agent write memory from their own messages in "
-                     f"shared chats: add '{key}' to plugins.entries.memory-shield.settings.trusted_users."]
+                     f"trusted_users. Trusted people may write memory from their own messages in shared chats and "
+                     f"correct the owner's profile in direct chats; once the list is set, direct chats with anyone "
+                     f"else are judged like a shared chat. Add '{key}' to "
+                     f"plugins.entries.memory-shield.settings.trusted_users."]
         else:  # e.g. a Telegram group that Hermes observes: the sender is not passed to plugins
             lines = [f"This {chat} chat passes no user id to plugins, so trusted_users cannot match here."]
         if chat_id:

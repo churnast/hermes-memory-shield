@@ -1,9 +1,11 @@
 """memory-shield: keep an agent from rewriting or wiping what it remembers about its owner.
 
 One pre_tool_call hook on the built-in `memory` tool, plus file and shell tools when they try to
-edit the memory files directly. By default the owner's profile is append-only, the agent's own
-notes cannot be deleted, and nothing is written to memory from a shared chat unless the person
-writing, or the chat itself, is on the owner's trusted list. Violations are blocked,
+edit the memory files directly. By default the owner may correct facts in the owner's profile in a
+direct chat but nobody can delete them, the agent's own notes cannot be deleted, and nothing is
+written to memory from a shared chat unless the person writing, or the chat itself, is on the
+owner's trusted list. Hermes' unattended background review may not touch the owner's profile at
+all. Violations are blocked,
 escalated to Hermes' approval gate ("approve") or only logged ("observe"). Right before an edit
 or deletion goes through, a copy of the memory file is kept so it can be restored.
 One slash command, /memory-shield, shows the policy, the log and the snapshots.

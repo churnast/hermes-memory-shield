@@ -1,7 +1,7 @@
 name: memory-shield
-version: 1.0.1
+version: 1.1.0
 manifest_version: 2
-description: "Guard rails for the built-in memory tool: the owner's profile is append-only, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
+description: "Guard rails for the built-in memory tool: only the owner can correct facts in the owner's profile and nobody can delete them, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
 author: "churnast"
 license: MIT
 homepage: "https://github.com/churnast/hermes-memory-shield"
@@ -13,13 +13,13 @@ provides_hooks:
 config_schema:
   user_profile:
     type: str
-    choices: [append_only, read_only, no_delete, "off"]
-    default: append_only
+    choices: [owner_edits, append_only, no_delete, read_only, "off"]
+    default: owner_edits
     label: "Owner profile (memory target 'user')"
-    description: "append_only: the agent may add facts but not rewrite or delete them."
+    description: "owner_edits: the agent may add facts anywhere it may write, and replace one only when the owner asks in a direct chat, the CLI or a chat in trusted_chats; nobody may delete one. append_only: add only, everywhere."
   agent_notes:
     type: str
-    choices: [no_delete, append_only, read_only, "off"]
+    choices: [no_delete, owner_edits, append_only, read_only, "off"]
     default: no_delete
     label: "Agent notes (memory target 'memory')"
     description: "no_delete: the agent may add and update its notes but not delete them."
@@ -45,7 +45,7 @@ config_schema:
     type: list
     default: []
     label: "Trusted people in shared chats"
-    description: "Ids as platform:id, for example telegram:123456789 (/memory-shield whoami shows yours). Their own messages in groups may write memory within the levels above. When set, only they may use /memory-shield log and restore."
+    description: "Ids as platform:id, for example telegram:123456789 (/memory-shield whoami shows yours). Their own messages in groups may write memory within the levels above. When set, a direct chat with anyone else is judged like a shared chat, and only they may use /memory-shield log and restore. The CLI always counts as the owner."
   trusted_chats:
     type: list
     default: []

@@ -6,6 +6,22 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [1.1.0] (2026-10-08)
+
+### Added
+
+- A new level for the owner's profile, `owner_edits`, now the default: the agent may add facts wherever it may write and may replace one only when the owner asks in a direct chat, the CLI or a chat in `trusted_chats` (and, once `trusted_users` is set, only for a person listed there); nobody may delete one, and a replace with empty or placeholder text still counts as a delete. In a group, a scheduled job or the background review it behaves like `append_only`. `append_only` stays available for owners who want nothing changed by the agent at all.
+- Hermes' unattended self-improvement review, the fork that tidies memory and skills after a conversation with nobody watching, may not add to, change or delete the owner's profile unless `user_profile` is `off`. The plugin reads Hermes' own marker for that fork (`tools.skill_provenance.is_unattended_review`), which reaches `pre_tool_call` hooks under the default `plugins.isolation: in_process`; a review the owner starts with `/refine` is attended and keeps the direct-chat rules. The agent's own notes keep their level there, where Hermes itself holds deletions for approval.
+
+### Changed
+
+- `trusted_users` now applies to direct chats too: once it is set, a direct chat with someone not listed is judged like a shared chat (read-only by default, `group_chats` decides), and `mode: approve` blocks there instead of asking. A session without a user id, such as the CLI, still counts as the owner. With `trusted_users` empty nothing changes. `/memory-shield` and `/memory-shield whoami` say so.
+- The policy hints name the new rules: a replace outside the owner's direct chat says that facts about the owner are changed only when the owner asks in a direct chat; a refused delete of a fact about the owner says that facts are never deleted and that placeholder text counts as deleting.
+
+### Fixed
+
+- Shell and Python side-door detection no longer refuses commands that only read a memory file or write somewhere else. Before, any command that mentioned a memory file together with any writing word was refused, so `cat ~/.hermes/memories/USER.md > /tmp/copy.md`, `cp ~/.hermes/memories/USER.md /tmp/x` and `grep ... USER.md > elsewhere` were blocked. Now the plugin reads the call command by command and counts only a write whose target is `USER.md`, `MEMORY.md` or the memory folder: a redirection, `tee`, `cp`, `install`, `rsync`, `ln` or `dd of=` into it, `sed -i` or `perl -i` on it, `rm`, `mv`, `truncate`, `shred` or `find -delete` of it, and in Python `open(..., "w"/"a"/"x"/"+")`, `write_text`, `write_bytes`, `unlink`, `os.remove`, `shutil.move`, `shutil.rmtree` and `shutil.copy` with it as the destination. Simple shell variables, `cd` into the memory folder and Python names assigned a memory path in the same call are followed, and quoted strings are read as shell text once, for `python -c`, `subprocess` and `os.system`.
+
 ## [1.0.1] (2026-10-08)
 
 ### Fixed
@@ -90,7 +106,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/churnast/hermes-memory-shield/releases/tag/v1.0.0
 [0.1.4]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.3...v0.1.4
