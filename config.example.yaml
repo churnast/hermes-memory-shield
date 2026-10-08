@@ -1,0 +1,15 @@
+# Example settings for memory-shield: copy the block into ~/.hermes/config.yaml.
+# `hermes plugins install churnast/hermes-memory-shield --enable` already enables the plugin.
+plugins:
+  entries:
+    memory-shield:
+      settings:
+        user_profile: append_only   # append_only | no_delete | read_only | off
+        agent_notes: no_delete      # no_delete | append_only | read_only | off
+        group_chats: read_only      # extra limit in groups, channels, forum topics, threads
+        scheduled_jobs: "off"       # extra limit in cron runs; "off" adds nothing
+        mode: block                 # block | approve | observe
+        trusted_users: []           # e.g. ["telegram:123456789"]; /memory-shield whoami shows yours
+        trusted_chats: []           # chats with only you and the agent, e.g. ["telegram:-1001234567890"]
+        audit_log: true             # keep the last 500 refused or flagged writes
+        snapshots: 20               # copies per memory file; 0 turns them off
