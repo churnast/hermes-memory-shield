@@ -6,6 +6,12 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [1.0.1] (2026-10-08)
+
+### Fixed
+
+- `/memory-shield log` follows the same rule as `/memory-shield restore`: it answers only in a direct chat, the CLI or a chat in `trusted_chats`, and when `trusted_users` is set, only the people listed there; a session without a user id, such as the CLI, counts as the owner. Before, anyone who could message the agent directly could read up to 50 events from every chat, with excerpts from the owner's own chats (for a deletion, words from the memory entry itself), even with `trusted_users` set. Someone not listed there gets a refusal that says where the command works and who may run it, and `restore` now gives the same one. `/memory-shield snapshots` is unchanged: it shows times, stores and sizes, no memory text.
+
 ## [1.0.0] (2026-10-08)
 
 The first stable release. What the plugin does as of this release is listed under Added and the two fixes since 0.1.4 under Fixed; the README, its banner, a catalog card and a short demo video are new.
@@ -84,7 +90,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/churnast/hermes-memory-shield/releases/tag/v1.0.0
 [0.1.4]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/churnast/hermes-memory-shield/compare/v0.1.2...v0.1.3

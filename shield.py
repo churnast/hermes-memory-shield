@@ -587,7 +587,7 @@ class Shield:
             if sub in ("", "policy", "status"):
                 return self.status_text()
             if sub == "log":
-                self._check_private_chat("The log")
+                self._check_owner_only("The log")
                 return self.log_text(int(words[1]) if len(words) > 1 and words[1].isdigit() else 10)
             if sub == "snapshots":
                 return self.snapshots_text()
@@ -595,7 +595,7 @@ class Shield:
                 if len(words) < 2 or not words[1].lstrip("#").isdigit():
                     raise ShieldError("Say which snapshot: '/memory-shield restore 1' (numbers from "
                                       "'/memory-shield snapshots').")
-                self._check_restore_allowed()
+                self._check_owner_only("Restore")
                 return self.restore(int(words[1].lstrip("#")))
             if sub == "whoami":
                 return self.whoami_text()
@@ -611,12 +611,16 @@ class Shield:
             raise ShieldError(f"{what} works only in a direct chat with the agent or in a chat listed in "
                               "trusted_chats.")
 
-    def _check_restore_allowed(self) -> None:
-        self._check_private_chat("Restore")
+    def _check_owner_only(self, what: str) -> None:
+        """Restore and the log: refuse where _check_private_chat does and, when trusted_users is set, refuse
+        anyone not listed there, in a direct chat too. A session without a user id, such as the CLI or a
+        trusted chat that passes none, counts as the owner."""
+        self._check_private_chat(what)
         platform = self._session("HERMES_SESSION_PLATFORM")
         user_id = self._session("HERMES_SESSION_USER_ID")
         if trusted_users(self._get_config) and user_id and not is_trusted(self._get_config, user_id, platform):
-            raise ShieldError("Only the people listed in trusted_users can restore memory.")
+            raise ShieldError(f"{what} works only for the people listed in trusted_users, in a direct chat with "
+                              "the agent or in a chat listed in trusted_chats.")
 
     def status_text(self) -> str:
         lines = [describe(self._get_config)]

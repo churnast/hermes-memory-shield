@@ -488,6 +488,32 @@ def test_log_is_shown_only_where_restore_may_run(tmp_path):
     assert "remove: Likes tea" in cli.command("log")
 
 
+UNTRUSTED_REFUSAL = ("memory-shield: {} works only for the people listed in trusted_users, in a direct chat with the "
+                     "agent or in a chat listed in trusted_chats.")
+
+
+def test_log_follows_trusted_users_in_direct_chats_like_restore(tmp_path):
+    settings = {"trusted_users": ["telegram:111"]}
+    owner, _, _ = make(tmp_path, **settings)  # the owner's direct chat, as telegram:111
+    owner.check("memory", {"action": "remove", "target": "user", "old_text": "Likes tea"})
+    assert "remove: Likes tea" in owner.command("log")
+    owner.snapshot("user")
+    dm = {"HERMES_SESSION_CHAT_ID": "999", "HERMES_SESSION_USER_ID": "999", "HERMES_SESSION_USER_NAME": "Sam"}
+    stranger, _, _ = make(tmp_path, dm, **settings)
+    same_id_elsewhere, _, _ = make(tmp_path, {"HERMES_SESSION_PLATFORM": "discord"}, **settings)
+    for service in (stranger, same_id_elsewhere):
+        for raw in ("log", "log 50"):
+            reply = service.command(raw)
+            assert reply == UNTRUSTED_REFUSAL.format("The log") and "tea" not in reply
+        assert service.command("restore 1") == UNTRUSTED_REFUSAL.format("Restore")  # one rule for both
+    cli, _, _ = make(tmp_path, {"HERMES_SESSION_CHAT_TYPE": "", "HERMES_SESSION_USER_ID": "",
+                                "HERMES_SESSION_PLATFORM": ""}, **settings)
+    assert "remove: Likes tea" in cli.command("log 50")
+    anyone, _, _ = make(tmp_path, dm)  # trusted_users empty: any direct chat gets the log, as before
+    for raw in ("log", "log 50"):
+        assert "remove: Likes tea" in anyone.command(raw)
+
+
 def test_status_whoami_and_usage(tmp_path):
     service, _, _ = make(tmp_path, trusted_users=["111"])
     service.check("memory", {"action": "remove", "target": "user", "old_text": "tea"})

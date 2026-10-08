@@ -1,5 +1,5 @@
 name: memory-shield
-version: 1.0.0
+version: 1.0.1
 manifest_version: 2
 description: "Guard rails for the built-in memory tool: the owner's profile is append-only, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
 author: "churnast"
@@ -45,7 +45,7 @@ config_schema:
     type: list
     default: []
     label: "Trusted people in shared chats"
-    description: "Ids as platform:id, for example telegram:123456789 (/memory-shield whoami shows yours). Their own messages in groups may write memory within the levels above."
+    description: "Ids as platform:id, for example telegram:123456789 (/memory-shield whoami shows yours). Their own messages in groups may write memory within the levels above. When set, only they may use /memory-shield log and restore."
   trusted_chats:
     type: list
     default: []

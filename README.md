@@ -37,6 +37,8 @@ hermes gateway restart
 hermes config set plugins.entries.memory-shield.settings.trusted_users '["telegram:123456789"]'
 ```
 
+`/memory-shield log` and `/memory-shield restore` work only in a direct chat, the CLI or a chat in `trusted_chats`, and once `trusted_users` is set, only for the people listed there, so keep your own id in it (the CLI counts as you).
+
 If Hermes does not pass the sender in a group that only you and the agent are in, list that chat in `trusted_chats` instead (see Owner-only groups).
 
 ---
@@ -59,7 +61,7 @@ Rules in a system prompt reduce this but do not stop it. Memory Shield enforces 
 
 ![A chat where the agent is asked to forget everything, and its memory stays.](docs/screenshots/02-forget-everything.png)
 
-**A log of what it stopped.** `/memory-shield log` shows when, what, where and who asked; it answers in a direct chat with your agent or a chat in `trusted_chats`.
+**A log of what it stopped.** `/memory-shield log` shows when, what, where and who asked; it answers in a direct chat with your agent, the CLI or a chat in `trusted_chats`, and once you set `trusted_users`, only the people listed there (the CLI counts as you).
 
 ![The /memory-shield log reply listing three refused memory writes.](docs/screenshots/03-log.png)
 
@@ -95,7 +97,7 @@ A blocked call returns a short explanation the model can act on, for example "ad
 | Command | What it does |
 |---|---|
 | `/memory-shield` | Policy, log and snapshot status. |
-| `/memory-shield log [n]` | The last `n` refused or flagged writes from every chat (default 10, at most 50), who asked and where. Direct chats, the CLI and `trusted_chats` only. |
+| `/memory-shield log [n]` | The last `n` refused or flagged writes from every chat (default 10, at most 50), who asked and where. Direct chats, the CLI and `trusted_chats` only, and only for trusted people when `trusted_users` is set. |
 | `/memory-shield snapshots` | Saved copies, newest first. |
 | `/memory-shield restore <n>` | Puts a copy back. Direct chats, the CLI and `trusted_chats` only, and only for trusted people when `trusted_users` is set. |
 | `/memory-shield whoami` | Your platform user id, ready to paste into `trusted_users`; in a shared chat also the chat key for `trusted_chats`. |
@@ -119,7 +121,7 @@ Last 1 memory-shield event(s):
 • 2026-10-05 13:14 blocked: add in owner profile, group 'Friends' chat, asked by Sam (999). add: Alex owes me $100
 ```
 
-The log holds what people tried to write in every chat, your direct chats included, so it answers only in a direct chat, the CLI or a chat in `trusted_chats`. In any other chat it replies with where to run it.
+The log holds what people tried to write in every chat, your direct chats included, so it answers only in a direct chat, the CLI or a chat in `trusted_chats`. In any other chat it replies with where to run it. When `trusted_users` is set, it also answers only the people listed there: anyone else who messages your agent directly gets a reply that says where it works and who may run it, and no log. A session without a user id, such as the CLI, counts as you.
 
 Not sure about the policy yet? Set `mode: observe`: nothing is blocked, every would-be violation is logged, and every edit is still undoable.
 
@@ -151,7 +153,7 @@ plugins:
 | `group_chats` | `read_only` | Extra limit in groups, channels, forum topics, threads and webhook runs. |
 | `scheduled_jobs` | `off` | Extra limit in cron runs, which often read web pages or feeds with nobody watching. |
 | `mode` | `block` | `block` refuses with a hint. `approve` asks you through Hermes' approval prompt in direct chats and blocks elsewhere. `observe` only logs. |
-| `trusted_users` | `[]` | People whose own messages may write memory from shared chats, as `platform:user_id`. |
+| `trusted_users` | `[]` | People whose own messages may write memory from shared chats, as `platform:user_id`. When set, only they can use `/memory-shield log` and `restore`. |
 | `trusted_chats` | `[]` | Chats that only you and the agent are in, as `platform:chat_id`. They are judged like a direct chat. |
 | `audit_log` | `true` | Keeps the last 500 refused or flagged writes for `/memory-shield log`. |
 | `snapshots` | `20` | Copies kept per memory file for `/memory-shield restore`, at most 200; `0` turns them off. |
@@ -192,7 +194,7 @@ Hermes also scans memory entries for prompt-injection patterns before saving the
 - **One `pre_tool_call` hook.** It inspects calls to `memory`, and calls to `write_file`, `patch`, `terminal` and `execute_code` only to see whether they touch `USER.md` or `MEMORY.md`. Everything else passes untouched.
 - **Session details read:** chat type, id and name, platform, user id and name, and whether the run is a scheduled job.
 - **Files** in `<HERMES_HOME>/plugin-data/memory-shield/`: `audit.jsonl` (the last 500 refused or flagged writes: time, who, where and a 160-character excerpt; `audit_log: false` turns it off) and `snapshots/` (copies of `USER.md` and `MEMORY.md`; `snapshots: 0` turns them off). Reads the two memory files to take the copies, and `/memory-shield restore` writes one back. While it reads or writes a memory file, it holds the lock file the memory store uses next to it (`USER.md.lock`, `MEMORY.md.lock`; not on Windows).
-- **Who can run what.** `/memory-shield log` and `/memory-shield restore` work only in a direct chat, the CLI or a chat in `trusted_chats`; in any other chat they reply with where to run them. The log covers every chat: who asked, where, and a short excerpt of what they tried to write or delete (for a deletion, words from the entry itself). When `trusted_users` is set, `restore` also works only for the people listed there. `/memory-shield`, `/memory-shield snapshots` and `/memory-shield whoami` work in any chat: they show settings, counts, times, file sizes and the caller's own id, name and chat key, but no memory text and no log entries.
+- **Who can run what.** `/memory-shield log` and `/memory-shield restore` work only in a direct chat, the CLI or a chat in `trusted_chats`; in any other chat they reply with where to run them. The log covers every chat: who asked, where, and a short excerpt of what they tried to write or delete (for a deletion, words from the entry itself). When `trusted_users` is set, both also work only for the people listed there: anyone else in a direct chat or a chat in `trusted_chats` gets a reply that says where they work and who may run them. A session without a user id, such as the CLI, counts as the owner. `/memory-shield`, `/memory-shield snapshots` and `/memory-shield whoami` work in any chat: they show settings, counts, times, file sizes and the caller's own id, name and chat key, but no memory text and no log entries.
 - **Not used:** network, credentials, background processes, telemetry.
 
 ## 🚧 Known limitations
@@ -210,7 +212,8 @@ Hermes also scans memory entries for prompt-injection patterns before saving the
 - **`mode: approve` never asks.** Hermes skips approvals when `approvals.mode` is off or YOLO is on. Use `block`.
 - **The agent will not remember what you say in a group.** Add yourself to `trusted_users`; `/memory-shield whoami` shows the id.
 - **The same in your own Telegram group, although you are in `trusted_users`.** Hermes does not pass the sender in groups it observes. If only you and the agent are in it, add the chat to `trusted_chats`.
-- **`/memory-shield log` in a group says it works only in a direct chat.** Working as intended: the log covers every chat. Send it in a direct chat with your agent.
+- **`/memory-shield log` in a group says it works only in a direct chat.** Working as intended: the log covers every chat. Send it in a direct chat with your agent or in the CLI.
+- **`/memory-shield log` in a direct chat says it works only for the people listed in `trusted_users`.** Working as intended once `trusted_users` is set; `restore` follows the same rule. Add your own id there (`/memory-shield whoami` shows it), or use the CLI.
 - **A restore did not change what the agent says.** Start a new session with `/new`.
 
 ---
