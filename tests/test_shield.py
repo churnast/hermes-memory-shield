@@ -432,18 +432,58 @@ def chained_aliases(count):
     return "\n".join(lines)
 
 
+def aliases_and_xargs(limit):
+    """Memory aliases and xargs removals in turn, cut at a line end before the limit."""
+    text = "".join(f"A{i}=~/.hermes/memories/USER.md\necho | xargs rm\n" for i in range(limit // 40))
+    return text[:text.rfind("\n", 0, limit)]
+
+
 @pytest.mark.parametrize("tool,args", [
-    ("execute_code", {"code": ".hermes.unlink(" * 2000}),
+    ("execute_code", {"code": ".hermes.unlink(" * 2000}),  # past the cap
+    ("execute_code", {"code": ".hermes.unlink(" * 1092}),
     ("execute_code", {"code": chained_aliases(30)}),
     ("execute_code", {"code": ".hermes/memories.write_text(" * 585}),
-    ("terminal", {"command": "A=~/.hermes/memories/USER.md\n" * 580 + "rm $A"}),
+    ("terminal", {"command": "A=~/.hermes/memories/USER.md\n" * 580 + "rm $A"}),  # past the cap
+    ("terminal", {"command": "A=~/.hermes/memories/USER.md\n" * 560 + "rm $A"}),
+    ("terminal", {"command": aliases_and_xargs(16380)}),
     ("terminal", {"command": "echo | xargs rm\n" * 1000}),
     ("terminal", {"command": '>"' * 8000}),
+    ("execute_code", {"code": "open(a" + " " * 16370 + ")"}),
+    ("terminal", {"command": "open(a" + " " * 16370 + ")"}),
+    ("execute_code", {"code": "open(" + " " * 16370 + ")"}),
 ])
 def test_hostile_payloads_are_judged_within_100_ms(tool, args):
     started = time.perf_counter()
     shield.decide(tool, args, DEFAULT, chat_type="dm")
     assert time.perf_counter() - started < 0.1
+
+
+def test_an_exhausted_alias_budget_counts_as_a_write():
+    shell = "F=~/.hermes/memories/USER.md\n" + "echo $F\n" * 700 + "echo pwned > $F"
+    assert len(shell) <= shield.MAX_SCAN_CHARS
+    assert shield.memory_file_target("terminal", {"command": shell}) == "user"
+    out = shield.decide("terminal", {"command": shell}, DEFAULT, chat_type="dm")
+    assert out and out["action"] == "block"
+    python = "p = '/root/.hermes/memories/USER.md'\n" + "open(p, 'r')\n" * 700 + "open(p, 'w').write('')"
+    assert len(python) <= shield.MAX_SCAN_CHARS
+    assert shield.memory_file_target("execute_code", {"code": python}) == "user"
+    reads = "F=~/.hermes/memories/USER.md\n" + "echo $F\n" * 3
+    assert shield.memory_file_target("terminal", {"command": reads}) is None  # within the budget: read as before
+
+
+@pytest.mark.parametrize("tail,target", [
+    ('rm ~/.hermes/mem"ori"es/US"ER".md', "user"),
+    ("rm ~/.hermes/mem\\ories/US\\ER.md", "user"),
+    ("rm ~/.hermes/MEMORIES/user.md", "user"),
+    ("rm ~/.hermes/Mem'ories'", "user"),
+    ('cat ME"MORY".md', "memory"),
+    ("cat memory.MD", "memory"),
+    ("rm /tmp/notes.md", None),
+])
+def test_the_unread_check_ignores_case_quotes_and_backslashes(tail, target):
+    filler = "echo hi\n" * 2100
+    assert len(filler) > shield.MAX_SCAN_CHARS
+    assert shield.memory_file_target("terminal", {"command": filler + tail}) == target
 
 
 def test_a_payload_past_the_cap_is_refused_unread_when_it_names_memory():
@@ -496,6 +536,7 @@ def test_atomic_write_uses_its_own_temp_file_and_keeps_the_mode(tmp_path):
     target = tmp_path / "USER.md"
     shield._write_atomic(target, b"one")
     assert target.read_bytes() == b"one" and list(tmp_path.iterdir()) == [target]
+    assert target.stat().st_mode & 0o777 == 0o600  # a new file is private
     target.chmod(0o644)
     shield._write_atomic(target, b"two")
     assert target.read_bytes() == b"two" and target.stat().st_mode & 0o777 == 0o644

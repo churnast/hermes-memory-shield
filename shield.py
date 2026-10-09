@@ -79,9 +79,11 @@ STUB_WORDS = frozenset({
     "borrado", "eliminado", "apagado", "gelöscht", "entfernt", "supprimé", "vide",
 })
 # A terminal or execute_code payload is read up to this many characters. A longer one is not read at all:
-# it is refused when it mentions the memory files or the memory folder and let through when it does not.
+# it is refused when it contains the word memories, USER.md or MEMORY.md in any case once quotes and
+# backslashes are dropped, and let through when it does not.
 MAX_SCAN_CHARS = 16 * 1024
-_MEMORY_MENTION = re.compile(r"memories|USER\.md|MEMORY\.md")
+_MEMORY_MENTION = re.compile(r"memories|user\.md|memory\.md", re.IGNORECASE)
+_SHELL_QUOTING = re.compile(r"[\"'\\]")
 _SHELL_MEMORY_DIR = re.compile(r"memories|\.hermes|HERMES_HOME")
 # Where the memory folder lives, as written in a path: $HERMES_HOME, ~/.hermes or hermes_home() in Python.
 _MEMORY_HOME = re.compile(r"\.hermes|HERMES_HOME|hermes_home\(\)")
@@ -110,8 +112,9 @@ _PY_STATEMENT = re.compile(r"[;\n]")
 _PY_WRITE_METHOD = re.compile(r"\.(?:write_text|write_bytes|unlink|rmdir|rename|truncate)\(")
 _PY_WRITE_FUNCTION = re.compile(r"os\.(?:remove|unlink|rmdir|rename|replace|truncate)\(|shutil\.(?:rmtree|move)\("
                                 r"|send2trash\(")
-_PY_ARG = r"((?:[^,()]|\([^()]*\))+)"
-_PY_OPEN = re.compile(r"\bopen\(\s*" + _PY_ARG + r"\s*,\s*(?:mode\s*=\s*)?['\"]([^'\"]*)['\"]")
+_PY_ARG = r"((?:[^,()]|\([^()]*\))++)"
+# Possessive, so a long run of spaces or of plain characters is read once instead of retried at every split.
+_PY_OPEN = re.compile(r"\bopen\(\s*+" + _PY_ARG + r"\s*,\s*+(?:mode\s*+=\s*+)?['\"]([^'\"]*)['\"]")
 _PY_COPY = re.compile(r"shutil\.copy\w*\(((?:[^()]|\([^()]*\))*)\)")
 _PY_STRING = re.compile(r"'([^'\n]*)'|\"([^\"\n]*)\"")
 _SHELL_REDIRECT_WORD = re.compile(r"^(?:&?\d?>{1,2}\|?|<{1,3})")
@@ -266,23 +269,26 @@ def too_long(code: str) -> bool:
 
 def _unread_target(code: str) -> str | None:
     """The store a payload too long to read is charged with: 'user' when it mentions the memory folder or
-    USER.md, 'memory' when it mentions only MEMORY.md, None when it mentions none of them."""
-    mentions = {match.group(0) for match in _MEMORY_MENTION.finditer(code)}
+    USER.md, 'memory' when it mentions only MEMORY.md, None when it mentions none of them. Case, quotes
+    and backslashes are ignored, so mem"ori"es or US\\ER.md still count."""
+    mentions = {match.group(0).lower() for match in _MEMORY_MENTION.finditer(_SHELL_QUOTING.sub("", code))}
     if not mentions:
         return None
-    return "memory" if mentions == {MEMORY_FILES["memory"]} else "user"
+    return "memory" if mentions == {"memory.md"} else "user"
 
 
 class _Aliases:
     """Names assigned a memory path earlier in the same call, for shell variables ($F, ${F}) or Python
     names. A value that refers to another alias is not kept, and values are substituted in one pass and
     never substituted again, so a chain of aliases cannot multiply the text; the substitution also stops
-    once it has added more than the cap to the call's text."""
+    once it has added more than the cap to the call's text, and a call that runs past that budget is
+    judged as a write to the owner's profile rather than read on without its aliases."""
 
     def __init__(self, shell: bool) -> None:
         self.values: dict[str, str] = {}
         self._pattern = _SHELL_VARIABLE if shell else _PY_NAME
         self._room = MAX_SCAN_CHARS
+        self.exhausted = False
 
     def refers_to_one(self, text: str) -> bool:
         return bool(self.values) and any(m.group(1) in self.values for m in self._pattern.finditer(text))
@@ -296,7 +302,10 @@ class _Aliases:
 
         def value(match: re.Match[str]) -> str:
             replacement = self.values.get(match.group(1))
-            if replacement is None or self._room < 0:
+            if replacement is None:
+                return match.group(0)
+            if self._room < 0:
+                self.exhausted = True
                 return match.group(0)
             self._room -= len(replacement) - len(match.group(0))
             return replacement
@@ -359,7 +368,7 @@ def _shell_targets(code: str, nested: bool = False) -> set[str]:
     hits: set[str] = set()
     aliases = _Aliases(shell=True)
     in_memory_dir = False
-    every_word: tuple[int, set[str]] | None = None  # memory paths among all words of the call, for xargs
+    xargs_removes = False  # memory paths among all words of the call count, read once after the loop
     for segment in _SHELL_SPLIT.split(code):
         segment = segment.strip()
         if not segment:
@@ -398,9 +407,11 @@ def _shell_targets(code: str, nested: bool = False) -> set[str]:
         elif command == "find" and any(found) and ("-delete" in words or any(w in ("rm", "mv") for w in words)):
             hits.update(t for t in found if t)
         elif command == "xargs" and any(w in _SHELL_ANY_ARG for w in words[1:]):
-            if every_word is None or every_word[0] != len(aliases.values):  # read the call once, not per xargs
-                every_word = (len(aliases.values), {t for t in (_memory_token(w, aliases) for w in code.split()) if t})
-            hits.update(every_word[1])
+            xargs_removes = True
+    if xargs_removes:
+        hits.update(t for t in (_memory_token(w, aliases) for w in code.split()) if t)
+    if aliases.exhausted:
+        hits.add("user")  # the alias budget ran out: fail closed rather than stop following the aliases
     if not nested:
         for match in _PY_STRING.finditer(code):
             hits |= _shell_targets(match.group(1) or match.group(2) or "", nested=True)
@@ -448,6 +459,8 @@ def _python_targets(code: str) -> set[str]:
             target = target_in(statement[function.end():])
             if target:
                 hits.add(target)
+    if aliases.exhausted:
+        hits.add("user")
     return hits
 
 

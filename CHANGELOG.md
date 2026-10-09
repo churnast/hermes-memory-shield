@@ -6,6 +6,20 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [1.1.2] (2026-10-09)
+
+### Fixed
+
+- A call that refers to a memory alias so often that following it would add more than 16,384 characters is now judged as a direct edit of the owner's profile, which the default policy refuses. In 1.1.1 the substitution stopped silently, so `F=~/.hermes/memories/USER.md`, then `echo $F` 700 times, then `echo pwned > $F` (5.6 KB) passed, and so did the Python form with `open(p, 'r')` 700 times before `open(p, 'w')`; 1.1.0 refused both.
+- The check for a call longer than 16,384 characters ignores case, quotes and backslashes: it looks for the word `memories`, `USER.md` or `MEMORY.md` after dropping `"`, `'` and `\`, so `mem"ori"es/US"ER".md`, `mem\ories/US\ER.md` and `MEMORIES/user.md` padded past the cap are refused again, as in 1.1.0. Such a call is charged to the agent's notes only when `MEMORY.md` is the only word found.
+- A shell call that mixes memory aliases with `xargs rm` reads its words once after the last command instead of once per new alias: an alternation of the two under 16 KB took 0.66 to 1.16 s on a Mac and now takes about 12 to 20 ms.
+- The pattern for `open(path, mode)` no longer retries a long run of spaces at every split: `open(a` followed by 16,370 spaces took about 280 ms, and `open(` followed by 2,000 spaces about 2.9 s (16,370 did not finish in 20 s), in both `execute_code` and `terminal`. Both now take about 3 ms. The verdicts are the same.
+- Timing tests now cover payloads just under the cap, where the scanner actually runs, as well as past it, and new tests cover the alias budget in shell and Python and the case, quote and backslash forms past the cap.
+
+### Changed
+
+- The README says what the check past the cap looks for (the word `memories`, `USER.md` or `MEMORY.md`, any case, quotes ignored), gives the cap as 16,384 characters, and says that a snapshot, the audit log or a restored memory file that did not exist before is created with mode 0600, while an existing one keeps its permissions.
+
 ## [1.1.1] (2026-10-09)
 
 ### Fixed
@@ -115,7 +129,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.0...v1.0.1
