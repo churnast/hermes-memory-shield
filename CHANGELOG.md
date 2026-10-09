@@ -6,6 +6,15 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [1.1.1] (2026-10-09)
+
+### Fixed
+
+- The `pre_tool_call` hook now has a bound on its time and memory use for `terminal` and `execute_code` calls, after a review of the plugin for the Hermes catalog. A call is read up to 16 KB; a longer one is judged without being read: it is refused when it mentions `USER.md`, `MEMORY.md` or the memories folder (with a hint to split it up or keep the memory files out of it) and let through when it mentions none of them. Before, a one-line call of `.hermes.unlink(` repeated 2000 times (30 KB) kept the hook busy for about two minutes, because the memory path was looked for once per `.unlink(` or `.write_text(` in a statement; it is now looked for once per statement.
+- Shell variables and Python names assigned a memory path are substituted in one pass, a name whose value refers to another such name is not kept, and the substitution stops once it has added more than 16 KB to the call. Before, about thirty chained lines like `a1 = '.hermes/memories' + a2 + a2` doubled the text at every step until memory ran out.
+- The two regular expressions that looked for the memories folder behind the Hermes home no longer rescan the rest of the line for every mention of the home.
+- Snapshots, the audit log and a restored memory file are written through a temporary file with a unique name in the same folder (`tempfile.mkstemp`) instead of a fixed `.tmp` neighbour, so two writers can never share one; a file that already exists keeps its permissions.
+
 ## [1.1.0] (2026-10-08)
 
 ### Added
@@ -106,7 +115,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/churnast/hermes-memory-shield/releases/tag/v1.0.0

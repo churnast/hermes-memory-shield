@@ -13,10 +13,11 @@ import logging
 import os
 import re
 import shlex
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,12 +78,19 @@ STUB_WORDS = frozenset({
     # Spanish, Portuguese, German, French
     "borrado", "eliminado", "apagado", "gelöscht", "entfernt", "supprimé", "vide",
 })
+# A terminal or execute_code payload is read up to this many characters. A longer one is not read at all:
+# it is refused when it mentions the memory files or the memory folder and let through when it does not.
+MAX_SCAN_CHARS = 16 * 1024
+_MEMORY_MENTION = re.compile(r"memories|USER\.md|MEMORY\.md")
 _SHELL_MEMORY_DIR = re.compile(r"memories|\.hermes|HERMES_HOME")
+# Where the memory folder lives, as written in a path: $HERMES_HOME, ~/.hermes or hermes_home() in Python.
+_MEMORY_HOME = re.compile(r"\.hermes|HERMES_HOME|hermes_home\(\)")
 # The memory folder itself, as a shell word, for commands that wipe or move it without naming a file.
-_SHELL_MEMORY_FOLDER = re.compile(r"(?:\.hermes|HERMES_HOME|hermes_home\(\))[^\s'\"]*/memories/?$|memories/\*$")
+_SHELL_MEMORY_FOLDER_END = re.compile(r"/memories/?$")
+_SHELL_MEMORY_GLOB = "memories/*"
 # The same two things inside a Python expression, where the path may be built from pieces.
 _PY_MEMORY_FILE = re.compile(r"(?<![\w.])(USER|MEMORY)\.md(?![\w.])")
-_PY_MEMORY_FOLDER = re.compile(r"(?:\.hermes|HERMES_HOME|hermes_home\(\))[^\n]*?memories(?![\w.\-/])")
+_PY_MEMORY_FOLDER_WORD = re.compile(r"memories(?![\w.\-/])")
 # Shell commands judged by where their target is. "any": any memory path among the arguments counts
 # (the file is removed, moved, truncated or edited in place); "last": only a memory path as the last
 # argument, the destination, counts, so copying a memory file somewhere else passes.
@@ -94,6 +102,8 @@ _SHELL_SPLIT = re.compile(r"\|\||&&|[;|\n]")
 _SHELL_REDIRECT = re.compile(r"(?<![<\w])&?\d?>{1,2}\|?\s*(\"[^\"]*\"|'[^']*'|\S+)")
 _SHELL_ALIAS = re.compile(r"^\s*(?:export\s+)?([A-Za-z_]\w*)=(\S+)")
 _PY_ALIAS = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(.+)$")
+_SHELL_VARIABLE = re.compile(r"\$\{?([A-Za-z_]\w*)\}?")
+_PY_NAME = re.compile(r"\b([A-Za-z_]\w*)\b")
 _PY_STATEMENT = re.compile(r"[;\n]")
 # Python calls that change or delete a file: methods of the path before the dot, and functions of the
 # path in their arguments.
@@ -241,21 +251,88 @@ def memory_file_target(tool_name: str, args: dict[str, Any],
         return None
     if tool_name in SHELL_TOOLS:
         code = str(args.get(SHELL_TOOLS[tool_name]) or "")
+        if too_long(code):
+            return _unread_target(code)
         hits = _shell_targets(code) | _python_targets(code)
         if hits:
             return "user" if "user" in hits else "memory"  # "user" first: the stricter store when both are named
     return None
 
 
-def _memory_token(token: str, aliases: dict[str, str], bare: bool = False) -> str | None:
+def too_long(code: str) -> bool:
+    """True when a shell or Python payload is past the cap and is judged without being read."""
+    return len(code) > MAX_SCAN_CHARS
+
+
+def _unread_target(code: str) -> str | None:
+    """The store a payload too long to read is charged with: 'user' when it mentions the memory folder or
+    USER.md, 'memory' when it mentions only MEMORY.md, None when it mentions none of them."""
+    mentions = {match.group(0) for match in _MEMORY_MENTION.finditer(code)}
+    if not mentions:
+        return None
+    return "memory" if mentions == {MEMORY_FILES["memory"]} else "user"
+
+
+class _Aliases:
+    """Names assigned a memory path earlier in the same call, for shell variables ($F, ${F}) or Python
+    names. A value that refers to another alias is not kept, and values are substituted in one pass and
+    never substituted again, so a chain of aliases cannot multiply the text; the substitution also stops
+    once it has added more than the cap to the call's text."""
+
+    def __init__(self, shell: bool) -> None:
+        self.values: dict[str, str] = {}
+        self._pattern = _SHELL_VARIABLE if shell else _PY_NAME
+        self._room = MAX_SCAN_CHARS
+
+    def refers_to_one(self, text: str) -> bool:
+        return bool(self.values) and any(m.group(1) in self.values for m in self._pattern.finditer(text))
+
+    def add(self, name: str, value: str) -> None:
+        self.values[name] = value
+
+    def expand(self, text: str) -> str:
+        if not self.values:
+            return text
+
+        def value(match: re.Match[str]) -> str:
+            replacement = self.values.get(match.group(1))
+            if replacement is None or self._room < 0:
+                return match.group(0)
+            self._room -= len(replacement) - len(match.group(0))
+            return replacement
+
+        return self._pattern.sub(value, text)
+
+
+def _memory_token(token: str, aliases: _Aliases, bare: bool = False) -> str | None:
     """'user' or 'memory' when a shell word names a memory file, 'user' when it names the memory folder."""
-    text = token.strip("'\"")
-    for name, value in aliases.items():
-        text = text.replace("${" + name + "}", value).replace("$" + name, value)
+    text = aliases.expand(token.strip("'\""))
     for target, name in MEMORY_FILES.items():
         if text.rsplit("/", 1)[-1] == name and (_SHELL_MEMORY_DIR.search(text) or bare):
             return target
-    return "user" if _SHELL_MEMORY_FOLDER.search(text) else None
+    return "user" if _shell_memory_folder(text) else None
+
+
+def _shell_memory_folder(text: str) -> bool:
+    """A shell word that is the memory folder: a path ending in /memories that starts from the Hermes home
+    somewhere in the same unquoted run, or a glob of everything in it."""
+    if text.endswith(_SHELL_MEMORY_GLOB):
+        return True
+    end = _SHELL_MEMORY_FOLDER_END.search(text)
+    if not end:
+        return False
+    run = re.split(r"[\s'\"]", text[:end.start()])[-1]
+    return _MEMORY_HOME.search(run) is not None
+
+
+def _py_memory_folder(text: str) -> bool:
+    """A Python expression that names the memory folder: the Hermes home followed by the word memories on
+    the same line, read once per line so many mentions of the home cannot multiply the work."""
+    for line in text.split("\n"):
+        home = _MEMORY_HOME.search(line)
+        if home and _PY_MEMORY_FOLDER_WORD.search(line, home.end()):
+            return True
+    return False
 
 
 def _operands(words: list[str]) -> list[str]:
@@ -280,8 +357,9 @@ def _shell_targets(code: str, nested: bool = False) -> set[str]:
     Reading a memory file, copying it elsewhere or redirecting elsewhere does not count. Quoted strings
     are read once as shell text too, for commands passed to python -c, subprocess or os.system."""
     hits: set[str] = set()
-    aliases: dict[str, str] = {}
+    aliases = _Aliases(shell=True)
     in_memory_dir = False
+    every_word: tuple[int, set[str]] | None = None  # memory paths among all words of the call, for xargs
     for segment in _SHELL_SPLIT.split(code):
         segment = segment.strip()
         if not segment:
@@ -295,8 +373,8 @@ def _shell_targets(code: str, nested: bool = False) -> set[str]:
         except ValueError:
             words = segment.split()
         alias = _SHELL_ALIAS.match(segment)
-        if alias and _memory_token(alias.group(2), aliases):
-            aliases[alias.group(1)] = alias.group(2).strip("'\"")
+        if alias and not aliases.refers_to_one(alias.group(2)) and _memory_token(alias.group(2), aliases):
+            aliases.add(alias.group(1), alias.group(2).strip("'\""))
         while words and (words[0] in _SHELL_PREFIXES or ("=" in words[0] and not words[0].startswith("-"))):
             words = words[1:]
         if not words:
@@ -320,7 +398,9 @@ def _shell_targets(code: str, nested: bool = False) -> set[str]:
         elif command == "find" and any(found) and ("-delete" in words or any(w in ("rm", "mv") for w in words)):
             hits.update(t for t in found if t)
         elif command == "xargs" and any(w in _SHELL_ANY_ARG for w in words[1:]):
-            hits.update(t for t in (_memory_token(w, aliases) for w in code.split()) if t)
+            if every_word is None or every_word[0] != len(aliases.values):  # read the call once, not per xargs
+                every_word = (len(aliases.values), {t for t in (_memory_token(w, aliases) for w in code.split()) if t})
+            hits.update(every_word[1])
     if not nested:
         for match in _PY_STRING.finditer(code):
             hits |= _shell_targets(match.group(1) or match.group(2) or "", nested=True)
@@ -331,23 +411,22 @@ def _python_targets(code: str) -> set[str]:
     """Memory files that Python code opens for writing, rewrites, deletes, moves or copies over, statement by
     statement; a name assigned a memory path earlier in the code counts as that path."""
     hits: set[str] = set()
-    aliases: dict[str, str] = {}
+    aliases = _Aliases(shell=False)
 
     def target_in(text: str) -> str | None:
-        for name, value in aliases.items():
-            text = re.sub(rf"\b{name}\b", lambda _match, value=value: value, text)
+        text = aliases.expand(text)
         found = _PY_MEMORY_FILE.search(text)
         if found and _SHELL_MEMORY_DIR.search(text):
             return "user" if found.group(1) == "USER" else "memory"
-        return "user" if _PY_MEMORY_FOLDER.search(text) else None
+        return "user" if _py_memory_folder(text) else None
 
     for statement in _PY_STATEMENT.split(code):
         statement = statement.strip()
         if not statement:
             continue
         alias = _PY_ALIAS.match(statement)
-        if alias and target_in(alias.group(2)):
-            aliases[alias.group(1)] = alias.group(2)
+        if alias and not aliases.refers_to_one(alias.group(2)) and target_in(alias.group(2)):
+            aliases.add(alias.group(1), alias.group(2))
         for match in _PY_OPEN.finditer(statement):
             target = target_in(match.group(1))
             if target and any(flag in match.group(2) for flag in "wax+"):
@@ -357,19 +436,28 @@ def _python_targets(code: str) -> set[str]:
             target = target_in(destination)
             if target:
                 hits.add(target)
-        for match in _PY_WRITE_METHOD.finditer(statement):
-            target = target_in(statement[:match.start()])  # the path before the dot
+        # The path is read once per statement, not once per call: the text before the last method call
+        # holds the paths before every dot, the text after the first function call holds every argument.
+        methods = list(_PY_WRITE_METHOD.finditer(statement))
+        if methods:
+            target = target_in(statement[:methods[-1].start()])
             if target:
                 hits.add(target)
-        for match in _PY_WRITE_FUNCTION.finditer(statement):
-            target = target_in(statement[match.end():])  # the path in the arguments
+        function = _PY_WRITE_FUNCTION.search(statement)
+        if function:
+            target = target_in(statement[function.end():])
             if target:
                 hits.add(target)
     return hits
 
 
-def _hint(target: str, allowed: Iterable[str], direct_edit: bool = False, context: str = "direct") -> str:
+def _hint(target: str, allowed: Iterable[str], direct_edit: bool = False, context: str = "direct",
+          unread: bool = False) -> str:
     allowed = set(allowed)
+    if unread:
+        return (f"The command is longer than {MAX_SCAN_CHARS // 1024} KB and names a memory file or the memory "
+                "folder, so it is refused without being read. Split it into shorter calls, or keep USER.md, "
+                "MEMORY.md and the memories folder out of it and use the memory tool for them.")
     if direct_edit:
         return ("Memory files are changed only through the memory tool, which keeps this policy and a "
                 "snapshot. Do not edit USER.md or MEMORY.md with file or shell tools.")
@@ -431,11 +519,13 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
     if tool_name not in WATCHED_TOOLS or not isinstance(args, dict):
         return None
     direct_edit = tool_name != TOOL
+    unread = False
     if direct_edit:
         target = memory_file_target(tool_name, args, memory_dir)
         if target is None:
             return None
         actions = list(ACTIONS)  # rewriting the file can add, change and delete entries at once
+        unread = tool_name in SHELL_TOOLS and too_long(str(args.get(SHELL_TOOLS[tool_name]) or ""))
     else:
         target = str(args.get("target") or "memory").lower()
         if target not in TARGET_SETTING:
@@ -445,7 +535,11 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
             return None
     target_level = level(get_config, TARGET_SETTING[target])
     allowed = set(LEVELS[target_level])
-    where = TARGET_LABEL[target] + (" (editing the file directly)" if direct_edit else "")
+    where = TARGET_LABEL[target]
+    if unread:
+        where += " (in a command too long to read)"
+    elif direct_edit:
+        where += " (editing the file directly)"
     if chat_type is None:
         chat_type = session_value("HERMES_SESSION_CHAT_TYPE")
     if platform is None:
@@ -480,7 +574,7 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
     if target_level == OWNER_EDITS and context == "direct":
         allowed.add("replace")  # the owner, in a direct chat, the CLI or a trusted chat, may correct entries
     denied = sorted({a for a in actions if a not in allowed}, key=ACTIONS.index)
-    hint = _hint(target, allowed, direct_edit, context) if denied else ""
+    hint = _hint(target, allowed, direct_edit, context, unread) if denied else ""
     return Verdict(target, actions, denied, where, hint, context, _fingerprint(tool_name, args))
 
 
@@ -606,10 +700,19 @@ def _file_lock(path: Path) -> Iterator[None]:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
+    """Write through a temporary file of its own in the same folder, so two writers never share one."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o777)  # mkstemp makes the file private; keep the old mode
+        os.replace(tmp, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # --- Plugin service ---------------------------------------------------------------------------

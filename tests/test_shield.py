@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -422,6 +423,83 @@ def test_direct_edit_of_the_resolved_memory_path(tmp_path):
     verdict = shield.evaluate("write_file", {"path": str(memories / "USER.md")}, strict, chat_type="dm",
                               memory_dir=lambda: memories)
     assert verdict.denied == ["replace", "remove"]
+
+
+def chained_aliases(count):
+    """Each name is built from the next one twice; a naive expansion doubles the text at every step."""
+    lines = [f"a{i} = '.hermes/memories' + a{i + 1} + a{i + 1}" for i in range(1, count)]
+    lines += [f"a{count} = '.hermes/memories'", "open(a1, 'w')"]
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("execute_code", {"code": ".hermes.unlink(" * 2000}),
+    ("execute_code", {"code": chained_aliases(30)}),
+    ("execute_code", {"code": ".hermes/memories.write_text(" * 585}),
+    ("terminal", {"command": "A=~/.hermes/memories/USER.md\n" * 580 + "rm $A"}),
+    ("terminal", {"command": "echo | xargs rm\n" * 1000}),
+    ("terminal", {"command": '>"' * 8000}),
+])
+def test_hostile_payloads_are_judged_within_100_ms(tool, args):
+    started = time.perf_counter()
+    shield.decide(tool, args, DEFAULT, chat_type="dm")
+    assert time.perf_counter() - started < 0.1
+
+
+def test_a_payload_past_the_cap_is_refused_unread_when_it_names_memory():
+    filler = "echo hello\n" * (shield.MAX_SCAN_CHARS // 11 + 1)
+    assert len(filler) > shield.MAX_SCAN_CHARS
+    out = shield.decide("terminal", {"command": filler + "cat ~/.hermes/memories/USER.md"}, DEFAULT, chat_type="dm")
+    assert out and out["action"] == "block" and "too long to read" in out["message"]
+    assert "16 KB" in out["message"] and "memory tool" in out["message"]
+    assert shield.memory_file_target("terminal", {"command": filler + "ls memories"}) == "user"
+    assert shield.memory_file_target("terminal", {"command": filler + "cat MEMORY.md"}) == "memory"
+    assert shield.memory_file_target("execute_code", {"code": "x = 1\n" + filler + "# USER.md"}) == "user"
+
+
+def test_a_payload_past_the_cap_passes_when_it_names_no_memory_file():
+    filler = "echo hello\n" * (shield.MAX_SCAN_CHARS // 11 + 1)
+    assert shield.decide("terminal", {"command": filler + "rm /tmp/x"}, DEFAULT, chat_type="dm") is None
+    assert shield.decide("execute_code", {"code": filler + "os.remove('/tmp/x')"}, DEFAULT, chat_type="dm") is None
+
+
+def test_a_payload_within_the_cap_is_read_as_before():
+    tail = "cat ~/.hermes/memories/USER.md"
+    filler = "echo hello\n" * ((shield.MAX_SCAN_CHARS - len(tail)) // 11)
+    assert len(filler + tail) <= shield.MAX_SCAN_CHARS
+    assert shield.decide("terminal", {"command": filler + tail}, DEFAULT, chat_type="dm") is None
+    out = shield.decide("terminal", {"command": filler + "rm ~/.hermes/memories/USER.md"}, DEFAULT, chat_type="dm")
+    assert out and "editing the file directly" in out["message"]
+
+
+def test_aliases_are_expanded_once_and_within_a_budget():
+    assert shield.memory_file_target("execute_code", {"code": chained_aliases(300)}) == "user"
+    aliases = shield._Aliases(shell=False)
+    aliases.add("a", "'.hermes/memories' + b + b")
+    assert aliases.refers_to_one("b + 1") is False and aliases.refers_to_one("a + 1") is True
+    aliases.add("b", "a + a")
+    assert aliases.expand("open(a, b)") == "open('.hermes/memories' + b + b, a + a)"  # one pass, nothing twice
+    shell = shield._Aliases(shell=True)
+    shell.add("F", "x" * shield.MAX_SCAN_CHARS)
+    out = shell.expand("$F ${F} $F")
+    assert out.count("$F") == 1 and len(out) < 3 * shield.MAX_SCAN_CHARS  # the third one is past the budget
+
+
+def test_an_alias_built_from_another_alias_is_not_kept():
+    code = "p = Path.home() / '.hermes' / 'memories'\nq = p / 'USER.md'\nq.write_text('')"
+    assert shield.memory_file_target("execute_code", {"code": code}) is None
+    code = "D=~/.hermes/memories\nF=$D/USER.md\nrm $F"
+    assert shield.memory_file_target("terminal", {"command": code}) is None
+
+
+def test_atomic_write_uses_its_own_temp_file_and_keeps_the_mode(tmp_path):
+    target = tmp_path / "USER.md"
+    shield._write_atomic(target, b"one")
+    assert target.read_bytes() == b"one" and list(tmp_path.iterdir()) == [target]
+    target.chmod(0o644)
+    shield._write_atomic(target, b"two")
+    assert target.read_bytes() == b"two" and target.stat().st_mode & 0o777 == 0o644
+    assert list(tmp_path.iterdir()) == [target]
 
 
 def test_observe_mode_lets_everything_through():
