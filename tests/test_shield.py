@@ -93,6 +93,20 @@ def test_agent_notes_cannot_be_deleted_by_default(action, allowed):
     assert (out is None) == allowed
 
 
+def test_patch_is_judged_as_a_replace():
+    # Hermes 0.22.5 renamed the memory tool's replace action to patch.
+    edit = {"action": "patch", "target": "memory", "old_text": "tea", "content": "coffee"}
+    assert shield.requested_actions(edit) == ["replace"]
+    assert shield.decide("memory", edit, DEFAULT, chat_type="dm") is None
+    assert shield.decide("memory", edit, DEFAULT, chat_type="group", user_id="999")["action"] == "block"
+    wipe = {"action": "patch", "target": "memory", "old_text": "Owner reads on Sundays", "content": ""}
+    assert shield.requested_actions(wipe) == ["remove"]
+    assert shield.decide("memory", wipe, DEFAULT, chat_type="dm")["action"] == "block"
+    batch = {"target": "user", "operations": [{"action": "add", "content": "x y z"},
+                                              {"action": "patch", "old_text": "a", "content": "b c d"}]}
+    assert shield.requested_actions(batch) == ["add", "replace"]
+
+
 def test_missing_target_means_agent_notes():
     assert shield.decide("memory", {"action": "remove"}, DEFAULT, chat_type="dm")["action"] == "block"
     assert shield.decide("memory", {"action": "replace", "content": "a fuller note"}, DEFAULT, chat_type="dm") is None

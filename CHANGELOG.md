@@ -6,6 +6,12 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+## [1.2.1] (2026-10-29)
+
+### Fixed
+
+- Hermes 0.22.5 renamed the memory tool's `replace` action to `patch`. A `patch` is now judged as a replace (and a `patch` to empty or placeholder text as a removal), so group chats, scheduled jobs and the notes policy cover it again instead of letting it through as an unknown action.
+
 ## [1.2.0] (2026-10-29)
 
 ### Added
@@ -146,7 +152,8 @@ First public release.
 - Snapshots of the memory file before every allowed edit or deletion, with `/memory-shield restore`.
 - Audit log of refused and flagged writes, shown by `/memory-shield log`; `/memory-shield whoami`.
 
-[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/churnast/hermes-memory-shield/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/churnast/hermes-memory-shield/compare/v1.1.0...v1.1.1

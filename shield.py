@@ -223,12 +223,15 @@ def is_stub(text: Any) -> bool:
 
 def requested_actions(args: dict[str, Any]) -> list[str]:
     """One action, or every action of a batch. A replace with empty or placeholder text counts as a
-    removal. Unknown or missing actions are left to the tool."""
+    removal. Hermes 0.22.5 renamed replace to patch (old_text is the span, content its new text), so
+    patch is judged as a replace. Unknown or missing actions are left to the tool."""
     operations = args.get("operations")
     ops = [op for op in operations if isinstance(op, dict)] if isinstance(operations, list) and operations else [args]
     found = []
     for op in ops:
         action = str(op.get("action") or "").lower()
+        if action == "patch":
+            action = "replace"
         if action == "replace" and is_stub(op.get("content") or op.get("new_text")):
             action = "remove"
         found.append(action)
