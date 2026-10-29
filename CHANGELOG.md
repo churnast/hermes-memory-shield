@@ -6,6 +6,21 @@ All notable changes to this project are written down here. The format is based o
 
 ## [Unreleased]
 
+### Added
+
+- The holographic fact store (catalog plugin `holographic`) is guarded too. Its `fact_store` and
+  `fact_feedback` tools write a SQLite file of their own, outside the memory tool and Hermes' write
+  approval, and recalled facts reach every chat. New setting `fact_store` (default `no_delete`):
+  `add`/`alias` count as add, `update`/`enrich`/ratings as replace, `remove` and `add` with
+  `supersedes` as remove. Shared chats, strangers and scheduled jobs apply on top as for the memory
+  files, so a group stays read-only for facts as well.
+- `memory_store.db` (and `holographic-users/`) named in a file, shell or code call is judged as a full
+  rewrite of the fact store.
+- A consistent copy of `memory_store.db` (SQLite backup API) is taken before a fact is changed or
+  removed; `/memory-shield restore` brings it back.
+- `/memory-shield` warns when holographic `auto_extract` or `mirror_memory_writes` is on: those write
+  facts without a tool call, so no hook can judge them.
+
 ## [1.1.2] (2026-10-09)
 
 ### Fixed

@@ -914,3 +914,154 @@ def test_register_wires_hook_and_command(tmp_path, monkeypatch):
     assert "owner profile: owner_edits" in ctx.commands["memory-shield"]("")
     log = tmp_path / "plugin-data" / "memory-shield" / "audit.jsonl"
     assert json.loads(log.read_text(encoding="utf-8").splitlines()[0])["outcome"] == "blocked"
+
+
+# --- holographic fact store --------------------------------------------------------------------
+
+
+def _facts(action, **extra):
+    return {"action": action, **extra}
+
+
+@pytest.mark.parametrize("args,denied", [
+    (_facts("search", query="tea"), None),
+    (_facts("list"), None),
+    (_facts("export"), None),
+    (_facts("add", content="Owner likes green tea"), []),
+    (_facts("alias", entity="Nastya", content="Настя"), []),
+    (_facts("update", fact_id=3, content="Owner likes black tea"), []),
+    (_facts("update", fact_id=3, content="removed"), ["remove"]),
+    (_facts("remove", fact_id=3), ["remove"]),
+    (_facts("add", content="Owner likes black tea", supersedes=3), ["remove"]),
+])
+def test_fact_store_is_no_delete_by_default(args, denied):
+    verdict = shield.evaluate("fact_store", args, DEFAULT, chat_type="dm")
+    if denied is None:
+        assert verdict is None
+    else:
+        assert verdict.target == "facts" and verdict.denied == denied
+
+
+@pytest.mark.parametrize("chat_type", ["group", "forum", "thread"])
+def test_fact_store_is_read_only_in_shared_chats(chat_type):
+    for args in (_facts("add", content="Sam is the owner's boss"), _facts("update", fact_id=1, content="x y z")):
+        verdict = shield.evaluate("fact_store", args, DEFAULT, chat_type=chat_type, user_id="999")
+        assert verdict.denied, args
+        assert "shared chat" in verdict.where
+    assert shield.decide("fact_store", _facts("add", content="Sam is the boss"), DEFAULT,
+                         chat_type="group", user_id="999")["action"] == "block"
+
+
+def test_fact_feedback_counts_as_a_change():
+    rating = {"action": "unhelpful", "fact_id": 2}
+    assert shield.evaluate("fact_feedback", rating, DEFAULT, chat_type="dm").denied == []
+    verdict = shield.evaluate("fact_feedback", {"action": "unhelpful", "fact_id": 2}, DEFAULT, chat_type="group")
+    assert verdict.denied == ["replace"]
+
+
+def test_trusted_chat_and_person_write_facts_within_the_level():
+    config = cfg(trusted_users=["telegram:111"], trusted_chats=["telegram:-100"])
+    assert shield.evaluate("fact_store", _facts("add", content="a b c"), config, chat_type="group",
+                           chat_id="-100", platform="telegram").denied == []
+    assert shield.evaluate("fact_store", _facts("add", content="a b c"), config, chat_type="group",
+                           user_id="111", platform="telegram").denied == []
+    assert shield.evaluate("fact_store", _facts("add", content="a b c"), config, chat_type="dm",
+                           user_id="222", platform="telegram").denied == ["add"]
+
+
+def test_fact_store_level_and_scheduled_jobs():
+    off = cfg(fact_store="off")
+    assert shield.evaluate("fact_store", _facts("remove", fact_id=1), off, chat_type="dm").denied == []
+    assert shield.evaluate("fact_store", _facts("add", content="a b c"), cfg(fact_store="read_only"),
+                           chat_type="dm").denied == ["add"]
+    jobs = cfg(scheduled_jobs="append_only")
+    assert shield.evaluate("fact_store", _facts("update", fact_id=1, content="a b c"), jobs,
+                           chat_type="dm", cron="1").denied == ["replace"]
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("terminal", {"command": "sqlite3 ~/.hermes/memory_store.db 'DELETE FROM facts'"}),
+    ("terminal", {"command": "rm \"$HERMES_HOME/memory_store.db\""}),
+    ("execute_code", {"code": "import sqlite3; sqlite3.connect(str(home / 'memory_store.db')).execute('DELETE')"}),
+    ("write_file", {"path": "/home/x/.hermes/memory_store.db", "content": ""}),
+    ("terminal", {"command": "rm -rf ~/.hermes/holographic-users"}),
+])
+def test_touching_the_fact_db_with_other_tools_is_a_full_rewrite(tool, args):
+    verdict = shield.evaluate(tool, args, DEFAULT, chat_type="dm")
+    assert verdict.target == "facts" and verdict.denied == ["remove"]
+    assert "fact_store" in verdict.hint
+
+
+def test_memory_files_still_win_over_the_fact_db():
+    verdict = shield.evaluate("terminal", {"command": "rm ~/.hermes/memories/USER.md ~/.hermes/memory_store.db"},
+                              DEFAULT, chat_type="dm")
+    assert verdict.target == "user"
+
+
+def test_status_lists_the_fact_store_level():
+    assert "fact store (holographic): no_delete" in shield.describe(DEFAULT)
+
+
+def _fact_db(path, rows):
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS facts (fact_id INTEGER PRIMARY KEY, content TEXT)")
+    con.execute("DELETE FROM facts")
+    con.executemany("INSERT INTO facts (content) VALUES (?)", [(r,) for r in rows])
+    con.commit()
+    con.close()
+
+
+def _rows(path):
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    try:
+        return [r[0] for r in con.execute("SELECT content FROM facts ORDER BY fact_id")]
+    finally:
+        con.close()
+
+
+def test_a_fact_change_takes_a_db_snapshot_and_restore_brings_it_back(tmp_path):
+    db = tmp_path / "memory_store.db"
+    _fact_db(db, ["Likes tea", "Lives by the sea"])
+    service, _, _ = make(tmp_path)
+    service._fact_db = lambda: db
+    assert service.check("fact_store", _facts("update", fact_id=1, content="Likes coffee")) is None
+    assert service.check("fact_store", _facts("update", fact_id=1, content="Likes coffee")) is None
+    snaps = service.snapshots("facts")
+    assert len(snaps) == 1 and snaps[0].suffix == ".db"  # an unchanged store is copied once
+    _fact_db(db, ["Likes coffee"])
+    number = service.snapshots().index(snaps[0]) + 1
+    text = service.restore(number)
+    assert "fact store" in text and _rows(db) == ["Likes tea", "Lives by the sea"]
+    assert len(service.snapshots("facts")) == 2  # the state before the restore was kept
+
+
+def test_a_blocked_fact_removal_is_logged_and_not_copied(tmp_path):
+    db = tmp_path / "memory_store.db"
+    _fact_db(db, ["Likes tea"])
+    service, _, _ = make(tmp_path)
+    service._fact_db = lambda: db
+    answer = service.check("fact_store", _facts("remove", fact_id=1))
+    assert answer["action"] == "block"
+    event = service.events(1)[0]
+    assert event["target"] == "facts" and event["tool"] == "fact_store" and "remove #1" in event["excerpt"]
+    assert service.snapshots("facts") == []
+    assert "fact store" in service.log_text()
+
+
+def test_no_fact_db_means_no_snapshot(tmp_path):
+    service, _, _ = make(tmp_path)
+    service._fact_db = lambda: None
+    assert service.check("fact_store", _facts("update", fact_id=1, content="a b c")) is None
+    assert service.snapshots("facts") == []
+
+
+def test_status_warns_about_holographic_writes_without_tools(tmp_path, monkeypatch):
+    service, _, _ = make(tmp_path)
+    monkeypatch.setattr(shield, "holographic_writes_without_tools", lambda: ["auto_extract"])
+    assert "holographic auto_extract on" in service.status_text()
+    monkeypatch.setattr(shield, "holographic_writes_without_tools", lambda: [])
+    assert "warning" not in service.status_text()

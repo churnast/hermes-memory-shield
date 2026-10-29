@@ -33,7 +33,18 @@ PLUGIN_NAME = "memory-shield"
 TOOL = "memory"
 DIRECT_EDIT_TOOLS = {"write_file": "path", "patch": "path"}
 SHELL_TOOLS = {"terminal": "command", "execute_code": "code"}
-WATCHED_TOOLS = frozenset({TOOL, *DIRECT_EDIT_TOOLS, *SHELL_TOOLS})
+# The holographic memory provider (catalog plugin "holographic", provider name hermes-memory-store) keeps
+# facts in a SQLite file of its own and writes it through these two tools, outside Hermes' memory tool and
+# its write approval. Their facts are recalled into ordinary turns, so a fact stored from a group reaches
+# direct chats too.
+FACT_TOOLS = {"fact_store", "fact_feedback"}
+FACT_TARGET = "facts"
+# fact_store actions that change the store, as the memory-tool action they amount to. Anything else
+# (search, probe, related, reason, contradict, list, stats, export, review, entities) only reads.
+FACT_ACTIONS = {"add": "add", "alias": "add", "update": "replace", "enrich": "replace", "remove": "remove"}
+FACT_DB_NAME = "memory_store.db"
+FACT_DB_MARKERS = re.compile(r"memory_store\.db|holographic-users", re.IGNORECASE)
+WATCHED_TOOLS = frozenset({TOOL, *DIRECT_EDIT_TOOLS, *SHELL_TOOLS, *FACT_TOOLS})
 ACTIONS = ("add", "replace", "remove")
 DESTRUCTIVE = frozenset({"replace", "remove"})
 OWNER_EDITS = "owner_edits"
@@ -50,6 +61,7 @@ DEFAULTS = {
     "agent_notes": "no_delete",      # target "memory": the agent's own notes
     "group_chats": "read_only",      # any shared chat: the stricter of this and the target level
     "scheduled_jobs": "off",         # cron runs: the stricter of this and the target level
+    "fact_store": "no_delete",       # target "facts": the holographic provider's fact store
     "mode": "block",                 # "approve": Hermes' approval gate; "observe": allow and log
 }
 DEFAULT_SNAPSHOTS = 20
@@ -61,9 +73,10 @@ SNAPSHOT_DIR = "snapshots"
 MEMORY_FILES = {"user": "USER.md", "memory": "MEMORY.md"}
 DIRECT_CHAT_TYPES = {"", "dm", "direct", "private", "im"}
 TRUTHY = {"1", "true", "yes", "on"}
-TARGET_SETTING = {"user": "user_profile", "memory": "agent_notes"}
-TARGET_LABEL = {"user": "the owner's profile", "memory": "the agent's own notes"}
-SHORT_LABEL = {"user": "owner profile", "memory": "agent notes"}
+TARGET_SETTING = {"user": "user_profile", "memory": "agent_notes", FACT_TARGET: "fact_store"}
+TARGET_LABEL = {"user": "the owner's profile", "memory": "the agent's own notes",
+                FACT_TARGET: "the fact store (holographic)"}
+SHORT_LABEL = {"user": "owner profile", "memory": "agent notes", FACT_TARGET: "fact store"}
 OUTCOME = {"block": "blocked", "approve": "sent for approval", "observe": "observed"}
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 # A "replace" whose new text is one of these, or has fewer than three letters or digits, wipes the
@@ -220,6 +233,38 @@ def requested_actions(args: dict[str, Any]) -> list[str]:
             action = "remove"
         found.append(action)
     return [a for a in found if a in ACTIONS]
+
+
+def fact_actions(tool_name: str, args: dict[str, Any]) -> list[str]:
+    """What a fact_store / fact_feedback call changes, as add / replace / remove; [] for a read.
+    'add' with supersedes also removes the old fact. A rating moves a fact's trust, and an 'unhelpful'
+    one sinks it below the recall threshold, so any rating counts as changing an existing fact."""
+    if tool_name == "fact_feedback":
+        return ["replace"]
+    action = str(args.get("action") or "").lower()
+    found = FACT_ACTIONS.get(action)
+    if found is None:
+        return []
+    if found == "replace" and action == "update" and "content" in args and is_stub(args.get("content")):
+        found = "remove"
+    actions = [found]
+    if action == "add" and args.get("supersedes") not in (None, "", 0):
+        actions.append("remove")
+    return sorted(set(actions), key=ACTIONS.index)
+
+
+def _mentions_fact_db(tool_name: str, args: dict[str, Any]) -> bool:
+    """A file or shell tool that names the fact store's SQLite file or its per-user folder. Only the
+    fact tools change the store; a shell or code call naming it is judged as a full rewrite."""
+    if tool_name in DIRECT_EDIT_TOOLS:
+        texts = [str(args.get(DIRECT_EDIT_TOOLS[tool_name]) or "")]
+        if tool_name == "patch":
+            texts.append(str(args.get("patch") or ""))
+    elif tool_name in SHELL_TOOLS:
+        texts = [str(args.get(SHELL_TOOLS[tool_name]) or "")]
+    else:
+        return False
+    return any(FACT_DB_MARKERS.search(_SHELL_QUOTING.sub("", text)) for text in texts)
 
 
 def is_shared_chat(chat_type: str) -> bool:
@@ -471,6 +516,10 @@ def _hint(target: str, allowed: Iterable[str], direct_edit: bool = False, contex
         return (f"The command is longer than {MAX_SCAN_CHARS // 1024} KB and names a memory file or the memory "
                 "folder, so it is refused without being read. Split it into shorter calls, or keep USER.md, "
                 "MEMORY.md and the memories folder out of it and use the memory tool for them.")
+    if direct_edit and target == FACT_TARGET:
+        return ("The fact store is changed only through fact_store, which keeps this policy and a snapshot. "
+                "Do not open memory_store.db with file, shell or code tools; read facts with fact_store "
+                "search, list or export.")
     if direct_edit:
         return ("Memory files are changed only through the memory tool, which keeps this policy and a "
                 "snapshot. Do not edit USER.md or MEMORY.md with file or shell tools.")
@@ -479,6 +528,13 @@ def _hint(target: str, allowed: Iterable[str], direct_edit: bool = False, contex
                 "owner's profile as it is.")
     if not allowed:
         return "Do not write to memory here. If something should be remembered, tell the owner in a direct chat."
+    if target == FACT_TARGET and allowed != {"add", "replace", "remove"}:
+        if allowed == {"add"}:
+            return ("Only new facts can be added here: no update, remove, supersedes, enrich or rating. "
+                    "Add a corrected fact instead and tell the owner which old one looks wrong.")
+        if allowed == {"add", "replace"}:
+            return ("Facts cannot be removed, and 'add' with supersedes removes the old one. Update the "
+                    "outdated fact with the corrected text instead.")
     if allowed == {"add"}:
         if target == "user":
             if context == "direct":
@@ -533,15 +589,23 @@ def evaluate(tool_name: str, args: dict[str, Any] | None, get_config: Callable[[
         return None
     direct_edit = tool_name != TOOL
     unread = False
-    if direct_edit:
+    if tool_name in FACT_TOOLS:
+        direct_edit = False
+        target = FACT_TARGET
+        actions = fact_actions(tool_name, args)
+        if not actions:
+            return None
+    elif direct_edit:
         target = memory_file_target(tool_name, args, memory_dir)
+        if target is None and _mentions_fact_db(tool_name, args):
+            target = FACT_TARGET
         if target is None:
             return None
         actions = list(ACTIONS)  # rewriting the file can add, change and delete entries at once
         unread = tool_name in SHELL_TOOLS and too_long(str(args.get(SHELL_TOOLS[tool_name]) or ""))
     else:
         target = str(args.get("target") or "memory").lower()
-        if target not in TARGET_SETTING:
+        if target not in MEMORY_FILES:
             return None
         actions = requested_actions(args)
         if not actions:
@@ -632,12 +696,13 @@ def describe(get_config: Callable[[str, Any], Any]) -> str:
         "memory-shield policy:",
         f"• owner profile: {level(get_config, 'user_profile')} (allowed: {names('user_profile')})",
         f"• agent notes: {level(get_config, 'agent_notes')} (allowed: {names('agent_notes')})",
+        f"• fact store (holographic): {level(get_config, 'fact_store')} (allowed: {names('fact_store')})",
         f"• shared chats: {level(get_config, 'group_chats')} (allowed: {names('group_chats')})",
         f"• scheduled jobs: {level(get_config, 'scheduled_jobs')} (allowed: {names('scheduled_jobs')})",
         f"• trusted people: {len(trusted) if trusted else 'nobody listed'}"
         + (" (direct chats with anyone else are judged like a shared chat)" if trusted else ""),
         f"• trusted chats, judged like direct chats: {len(chats) if chats else 'none'}",
-        "• editing USER.md / MEMORY.md with file or shell tools: judged as add + replace + remove",
+        "• editing USER.md / MEMORY.md / memory_store.db with file or shell tools: judged as add + replace + remove",
         f"• on a violation: {on_violation}",
     ])
 
@@ -648,6 +713,11 @@ def excerpt(args: dict[str, Any], tool_name: str = TOOL) -> str:
         joined = f"{tool_name} {args.get(DIRECT_EDIT_TOOLS[tool_name]) or ''}".strip()
     elif tool_name in SHELL_TOOLS:
         joined = f"{tool_name}: {args.get(SHELL_TOOLS[tool_name]) or ''}".strip()
+    elif tool_name in FACT_TOOLS:
+        action = str(args.get("action") or "")
+        fact = args.get("fact_id") or args.get("supersedes")
+        joined = f"{tool_name} {action}{f' #{fact}' if fact else ''}: {args.get('content') or args.get('entity') or ''}"
+        joined = joined.rstrip(": ")
     else:
         operations = args.get("operations")
         ops = operations if isinstance(operations, list) and operations else [args]
@@ -694,6 +764,65 @@ def default_memory_dir() -> Path:
         return _hermes_home() / "memories"
 
 
+def default_fact_db() -> Path | None:
+    """The holographic provider's SQLite file: plugins.hermes-memory-store.db_path from Hermes' config
+    ($HERMES_HOME expanded), else <HERMES_HOME>/memory_store.db. None when it does not exist. The per-user
+    files of scope: user are not copied."""
+    raw = ""
+    try:
+        from hermes_cli.config import load_config  # type: ignore
+
+        section = ((load_config() or {}).get("plugins") or {}).get("hermes-memory-store") or {}
+        raw = str(section.get("db_path") or "")
+    except Exception:
+        raw = ""
+    home = _hermes_home()
+    if raw:
+        path = Path(os.path.expanduser(raw.replace("$HERMES_HOME", str(home)).replace("${HERMES_HOME}", str(home))))
+    else:
+        path = home / FACT_DB_NAME
+    return path if path.is_file() else None
+
+
+def holographic_writes_without_tools() -> list[str]:
+    """Holographic settings that write facts with no tool call, so no pre_tool_call hook can judge them."""
+    try:
+        from hermes_cli.config import load_config  # type: ignore
+
+        config = load_config() or {}
+    except Exception:
+        return []
+    if str((config.get("memory") or {}).get("provider") or "").lower() not in ("holographic", "hermes-memory-store"):
+        return []
+    section = (config.get("plugins") or {}).get("hermes-memory-store") or {}
+    return [key for key in ("auto_extract", "mirror_memory_writes")
+            if str(section.get(key, "false")).strip().lower() in TRUTHY]
+
+
+def _copy_sqlite(source: Path, destination: Path) -> None:
+    """A consistent copy of a live SQLite file through the backup API, written atomically."""
+    import sqlite3
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp", dir=destination.parent)
+    os.close(fd)
+    try:
+        src = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=10)
+        try:
+            dst = sqlite3.connect(tmp)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        os.replace(tmp, destination)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 @contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
     """Hold the memory store's own lock file (USER.md.lock) while reading or writing."""
@@ -738,8 +867,10 @@ class Shield:
                  data_dir: Callable[[], Path] | None = None,
                  memory_dir: Callable[[], Path] | None = None,
                  clock: Callable[[], float] = time.time,
-                 session: Callable[[str], str] = session_value) -> None:
+                 session: Callable[[str], str] = session_value,
+                 fact_db: Callable[[], Path | None] = default_fact_db) -> None:
         self._get_config = get_config
+        self._fact_db = fact_db
         self._data_dir = data_dir or default_data_dir
         self._memory_dir = memory_dir or default_memory_dir
         self._clock = clock
@@ -832,11 +963,17 @@ class Shield:
         folder = self._snapshot_dir()
         if not folder.is_dir():
             return []
-        pattern = f"*-{target}.md" if target else "*.md"
-        return sorted((p for p in folder.glob(pattern) if p.is_file()), reverse=True)
+        if target:
+            pattern = f"*-{target}.db" if target == FACT_TARGET else f"*-{target}.md"
+            found = folder.glob(pattern)
+        else:
+            found = [*folder.glob("*.md"), *folder.glob(f"*-{FACT_TARGET}.db")]
+        return sorted((p for p in found if p.is_file()), reverse=True)
 
     def snapshot(self, target: str) -> Path | None:
         limit = self.snapshot_limit()
+        if limit and target == FACT_TARGET:
+            return self._snapshot_facts(limit)
         if not limit or target not in MEMORY_FILES:
             return None
         source = self._memory_dir() / MEMORY_FILES[target]
@@ -856,12 +993,42 @@ class Shield:
                 old.unlink(missing_ok=True)
             return path
 
+    def _snapshot_facts(self, limit: int) -> Path | None:
+        source = self._fact_db()
+        if source is None:
+            return None
+        with self._lock:
+            now = self._clock()
+            name = (f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-{int(now * 1000) % 1000:03d}"
+                    f"-{FACT_TARGET}.db")
+            path = self._snapshot_dir() / name
+            _copy_sqlite(source, path)
+            existing = self.snapshots(FACT_TARGET)
+            if len(existing) > 1 and existing[1].read_bytes() == path.read_bytes():
+                path.unlink(missing_ok=True)  # nothing changed since the last copy
+                return existing[1]
+            for old in self.snapshots(FACT_TARGET)[limit:]:
+                old.unlink(missing_ok=True)
+            return path
+
+    def _restore_facts(self, number: int, chosen: Path) -> str:
+        destination = self._fact_db()
+        if destination is None:
+            raise ShieldError("The fact store file was not found, so there is nothing to restore into.")
+        before = self.snapshot(FACT_TARGET)
+        _copy_sqlite(chosen, destination)
+        saved = " The state before the restore was saved as a new snapshot." if before else ""
+        return (f"Restored the fact store from snapshot #{number} ({self._when(chosen)}).{saved} "
+                "Restart the gateway so the provider reopens the file.")
+
     def restore(self, number: int) -> str:
         files = self.snapshots()
         if not 1 <= number <= len(files):
             raise ShieldError(f"There is no snapshot #{number}. '/memory-shield snapshots' lists them.")
         chosen = files[number - 1]
         target = chosen.stem.rsplit("-", 1)[-1]
+        if target == FACT_TARGET and chosen.suffix == ".db":
+            return self._restore_facts(number, chosen)
         if target not in MEMORY_FILES:
             raise ShieldError(f"Snapshot #{number} does not belong to a memory file.")
         data = chosen.read_bytes()  # read first: the copy below may rotate the chosen file out
@@ -939,6 +1106,11 @@ class Shield:
             lines.append(f"• snapshots: {len(kept)} kept{latest}, up to {limit} per file")
         else:
             lines.append("• snapshots: off")
+        unguarded = holographic_writes_without_tools()
+        if unguarded:
+            lines.append(f"• warning: holographic {' and '.join(unguarded)} on: those facts are written without a "
+                         "tool call, so this policy cannot judge them. Turn them off "
+                         "(plugins.hermes-memory-store) to keep shared chats read-only.")
         lines.append("Commands: /memory-shield log · snapshots · restore <n> · whoami")
         return "\n".join(lines)
 

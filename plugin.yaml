@@ -1,7 +1,7 @@
 name: memory-shield
 version: 1.1.2
 manifest_version: 2
-description: "Guard rails for the built-in memory tool: only the owner can correct facts in the owner's profile and nobody can delete them, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
+description: "Guard rails for the built-in memory tool and the holographic fact store: only the owner can correct facts in the owner's profile and nobody can delete them, the agent's notes cannot be deleted, shared chats are read-only except for trusted people. Block, ask, or just log; every edit is undoable from a snapshot."
 author: "churnast"
 license: MIT
 homepage: "https://github.com/churnast/hermes-memory-shield"
@@ -23,6 +23,12 @@ config_schema:
     default: no_delete
     label: "Agent notes (memory target 'memory')"
     description: "no_delete: the agent may add and update its notes but not delete them."
+  fact_store:
+    type: str
+    choices: [no_delete, owner_edits, append_only, read_only, "off"]
+    default: no_delete
+    label: "Fact store (holographic provider)"
+    description: "fact_store add / update / remove / alias / enrich and fact_feedback, plus memory_store.db through file or shell tools. no_delete: facts may be added and updated, not removed (add with supersedes removes the old fact). Shared chats and scheduled jobs apply on top, as for the memory files."
   group_chats:
     type: str
     choices: [read_only, append_only, no_delete, "off"]
